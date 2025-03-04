@@ -58,7 +58,9 @@ class Crane(sim.Component):
         try:
             self.position = spatial_manager.get_crane_home_position(bay) if spatial_manager else {"x": 0, "y": 0}
         except (AttributeError, TypeError) as e:
-            logger.error(f"Error getting home position: {e}", exc_info=True)
+            logger.error(f"Error getting home position: {e}", 
+                       extra={"component": "crane", "crane_id": crane_id, "bay": bay}, 
+                       exc_info=True)
             self.position = {"x": 0, "y": 0}
             
         self.z_position = 0  # Crane height
@@ -93,44 +95,87 @@ class Crane(sim.Component):
                 current_time = self.env.now()
                 current_state = self.crane_state.value
                 
-                # Deadlock detection
+                # Enhanced deadlock detection with context
                 if current_state != CraneState.IDLE.value and current_time - self.last_state_change > self.DEADLOCK_TIMEOUT:
                     logger.warning(f"Potential deadlock detected in {self.name()}: stuck in {current_state} for {current_time - self.last_state_change} minutes", 
-                                  extra={"component": "crane", "crane_id": self.unit_id, "state": current_state})
+                                  extra={
+                                      "component": "crane", 
+                                      "crane_id": self.unit_id, 
+                                      "state": current_state,
+                                      "bay": self.bay,
+                                      "duration": current_time - self.last_state_change,
+                                      "source": self.source,
+                                      "destination": self.destination,
+                                      "has_ladle": self.current_ladle is not None
+                                  })
                 
                 if current_state == CraneState.IDLE.value and self.task_queue:
                     try:
                         _, source, destination = heappop(self.task_queue)
                         self.assign_task(source, destination)
-                    except (IndexError, ValueError) as e:
-                        logger.error(f"Error processing task from queue in {self.name()}: {e}", exc_info=True)
+                    except IndexError as e:
+                        logger.error(f"Empty task queue for {self.name()} despite non-zero length", 
+                                    extra={"component": "crane", "crane_id": self.unit_id, "queue_size": len(self.task_queue)})
+                        yield self.hold(1)
+                    except ValueError as e:
+                        logger.error(f"Invalid task format in queue for {self.name()}: {e}", 
+                                    extra={"component": "crane", "crane_id": self.unit_id})
+                        yield self.hold(1)
+                    except TypeError as e:
+                        logger.error(f"Task data type error for {self.name()}: {e}", 
+                                    extra={"component": "crane", "crane_id": self.unit_id})
                         yield self.hold(1)
                         
                 elif current_state == CraneState.MOVING.value:
                     try:
-                        # Validate required fields are not None
+                        # Validate required fields with specific exceptions
                         if self.destination is None:
-                            raise ValueError("Destination is None")
+                            raise ValueError("Destination is None during movement")
                             
-                        move_time = self._calculate_movement_time(self.position, self.get_position(self.destination))
+                        # Get position with better error handling
+                        try:
+                            destination_pos = self.get_position(self.destination)
+                        except ValueError as e:
+                            logger.error(f"Invalid destination for {self.name()}: {e}", 
+                                       extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination})
+                            self._handle_error_state()
+                            yield self.hold(1)
+                            continue
+                            
+                        move_time = self._calculate_movement_time(self.position, destination_pos)
                         start_time = current_time
                         
                         logger.info(f"Crane {self.name()} moving to {self.destination}, ETA: {move_time:.1f} min", 
-                                   extra={"component": "crane", "destination": self.destination, "eta": move_time})
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination, 
+                                          "from_pos": self.position, "to_pos": destination_pos, "eta": move_time})
                         
                         yield self.hold(move_time)
-                        self.position = self.get_position(self.destination)
+                        self.position = destination_pos
                         
                         # Record metrics
                         self.operation_times["moving"].append(self.env.now() - start_time)
                         
-                        # Atomic state transition
+                        # Atomic state transition with validation
                         with self.state_lock:
-                            self.crane_state.set(CraneState.LIFTING.value if not self.current_ladle else CraneState.LOWERING.value)
+                            next_state = CraneState.LIFTING.value if not self.current_ladle else CraneState.LOWERING.value
+                            self.crane_state.set(next_state)
                             self.last_state_change = self.env.now()
+                            logger.debug(f"Crane {self.name()} state changed to {next_state} after movement", 
+                                       extra={"component": "crane", "crane_id": self.unit_id, "previous_state": current_state, "new_state": next_state})
                             
-                    except (ValueError, TypeError, AttributeError) as e:
-                        logger.error(f"Error during crane movement for {self.name()}: {e}", exc_info=True)
+                    except ValueError as e:
+                        logger.error(f"Value error during crane movement for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination})
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except TypeError as e:
+                        logger.error(f"Type error during crane movement for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "position": self.position, "destination": self.destination})
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except AttributeError as e:
+                        logger.error(f"Attribute error during crane movement for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "spatial_manager": self.spatial_manager is not None})
                         self._handle_error_state()
                         yield self.hold(1)
                         
@@ -143,13 +188,15 @@ class Crane(sim.Component):
                         start_time = current_time
                         
                         logger.info(f"Crane {self.name()} lifting ladle at {self.source}, time: {lift_time:.1f} min", 
-                                   extra={"component": "crane", "source": self.source, "lift_time": lift_time})
+                                   extra={"component": "crane", "crane_id": self.unit_id, "source": self.source, 
+                                          "position": self.position, "lift_time": lift_time})
                                    
                         yield self.hold(lift_time)
                         
                         # Record metrics
                         self.operation_times["lifting"].append(self.env.now() - start_time)
                         
+                        # Get unit with better error handling
                         unit = self.find_unit(self.source)
                         if unit is None:
                             raise ValueError(f"Unit not found at {self.source}")
@@ -158,27 +205,45 @@ class Crane(sim.Component):
                             raise AttributeError(f"Unit at {self.source} has no current_ladle attribute")
                         
                         if unit.current_ladle is None:
-                            logger.warning(f"No ladle found at {self.source} for crane {self.name()}")
-                            self.crane_state.set(CraneState.IDLE.value)
+                            logger.warning(f"No ladle found at {self.source} for crane {self.name()}",
+                                         extra={"component": "crane", "crane_id": self.unit_id, "source": self.source, 
+                                                "unit_type": type(unit).__name__})
+                            with self.state_lock:
+                                self.crane_state.set(CraneState.IDLE.value)
+                                self.last_state_change = self.env.now()
                             self.source = None
                             self.destination = None
                             continue
                             
                         self.current_ladle = unit.current_ladle
-                        self.current_heat = unit.current_ladle.current_heat
+                        self.current_heat = unit.current_ladle.current_heat if hasattr(unit.current_ladle, "current_heat") else None
                         unit.current_ladle = None
                         
                         logger.info(f"Crane {self.name()} picked up ladle {self.current_ladle.id} with heat {self.current_heat.id if self.current_heat else 'None'}", 
-                                   extra={"component": "crane", "ladle_id": self.current_ladle.id, 
-                                          "heat_id": self.current_heat.id if self.current_heat else None})
+                                   extra={"component": "crane", "crane_id": self.unit_id, "ladle_id": self.current_ladle.id, 
+                                          "heat_id": self.current_heat.id if self.current_heat else None,
+                                          "source_unit": type(unit).__name__})
                         
-                        # Atomic state transition
+                        # Atomic state transition with validation
                         with self.state_lock:
                             self.crane_state.set(CraneState.MOVING.value)
                             self.last_state_change = self.env.now()
+                            logger.debug(f"Crane {self.name()} state changed to MOVING after lifting", 
+                                       extra={"component": "crane", "crane_id": self.unit_id})
                             
-                    except (AttributeError, ValueError, TypeError) as e:
-                        logger.error(f"Error during crane lifting for {self.name()}: {e}", exc_info=True)
+                    except AttributeError as e:
+                        logger.error(f"Attribute error during crane lifting for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "source": self.source}, exc_info=True)
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except ValueError as e:
+                        logger.error(f"Value error during crane lifting for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "source": self.source})
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except TypeError as e:
+                        logger.error(f"Type error during crane lifting for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "source": self.source})
                         self._handle_error_state()
                         yield self.hold(1)
                         
@@ -187,17 +252,22 @@ class Crane(sim.Component):
                         if self.destination is None:
                             raise ValueError("Destination is None during lowering operation")
                             
+                        if self.current_ladle is None:
+                            raise ValueError("No ladle present during lowering operation")
+                            
                         lower_time = self._calculate_lower_time()
                         start_time = current_time
                         
                         logger.info(f"Crane {self.name()} lowering ladle at {self.destination}, time: {lower_time:.1f} min", 
-                                   extra={"component": "crane", "destination": self.destination, "lower_time": lower_time})
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination, 
+                                          "ladle_id": self.current_ladle.id, "lower_time": lower_time})
                                    
                         yield self.hold(lower_time)
                         
                         # Record metrics
                         self.operation_times["lowering"].append(self.env.now() - start_time)
                         
+                        # Find unit with better error handling
                         unit = self.find_unit(self.destination)
                         if unit is None:
                             raise ValueError(f"Destination unit not found at {self.destination}")
@@ -212,15 +282,27 @@ class Crane(sim.Component):
                             success = unit.add_ladle(self.current_ladle)
                             if success:
                                 logger.info(f"Crane {self.name()} placed ladle {self.current_ladle.id} at {self.destination}", 
-                                          extra={"component": "crane", "ladle_id": self.current_ladle.id, "destination": self.destination})
+                                          extra={"component": "crane", "crane_id": self.unit_id, "ladle_id": self.current_ladle.id, 
+                                                 "destination": self.destination, "destination_unit": type(unit).__name__})
                             else:
                                 logger.error(f"Failed to place ladle {self.current_ladle.id} at {self.destination}", 
-                                           extra={"component": "crane", "ladle_id": self.current_ladle.id, "destination": self.destination})
+                                           extra={"component": "crane", "crane_id": self.unit_id, "ladle_id": self.current_ladle.id, 
+                                                  "destination": self.destination, "destination_unit": type(unit).__name__})
                         except AttributeError as e:
-                            logger.error(f"Unit at {self.destination} lacks add_ladle method: {e}", exc_info=True)
+                            logger.error(f"Unit at {self.destination} lacks add_ladle method: {e}", 
+                                      extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination}, exc_info=True)
+                            self.error_count += 1
+                        except ValueError as e:
+                            logger.error(f"Value error during ladle placement: {e}", 
+                                      extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination}, exc_info=True)
+                            self.error_count += 1
+                        except TypeError as e:
+                            logger.error(f"Type error during ladle placement: {e}", 
+                                      extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination}, exc_info=True)
                             self.error_count += 1
                         except Exception as e:
-                            logger.error(f"Unexpected error during ladle placement: {e}", exc_info=True)
+                            logger.error(f"Unexpected error during ladle placement: {e}", 
+                                      extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination}, exc_info=True)
                             self.error_count += 1
                         finally:
                             # Clean up and return to idle state regardless of errors
@@ -233,27 +315,66 @@ class Crane(sim.Component):
                             with self.state_lock:
                                 self.crane_state.set(CraneState.IDLE.value)
                                 self.last_state_change = self.env.now()
+                                logger.debug(f"Crane {self.name()} state changed to IDLE after lowering", 
+                                           extra={"component": "crane", "crane_id": self.unit_id})
                                 
-                    except (ValueError, TypeError) as e:
-                        logger.error(f"Error during crane lowering for {self.name()}: {e}", exc_info=True)
+                    except ValueError as e:
+                        logger.error(f"Value error during crane lowering for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination})
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except TypeError as e:
+                        logger.error(f"Type error during crane lowering for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination})
+                        self._handle_error_state()
+                        yield self.hold(1)
+                    except AttributeError as e:
+                        logger.error(f"Attribute error during crane lowering for {self.name()}: {e}", 
+                                   extra={"component": "crane", "crane_id": self.unit_id, "destination": self.destination}, exc_info=True)
                         self._handle_error_state()
                         yield self.hold(1)
                         
                 elif current_state == CraneState.ERROR.value:
-                    # Recovery from error state
-                    logger.info(f"Crane {self.name()} attempting recovery from error state")
+                    # Enhanced recovery from error state with structured logging
+                    logger.info(f"Crane {self.name()} attempting recovery from error state",
+                              extra={
+                                  "component": "crane", 
+                                  "crane_id": self.unit_id,
+                                  "bay": self.bay,
+                                  "has_ladle": self.current_ladle is not None,
+                                  "source": self.source,
+                                  "destination": self.destination,
+                                  "error_count": self.error_count
+                              })
+                              
+                    # Clear all state variables for clean recovery
                     self.current_ladle = None
                     self.current_heat = None
                     self.source = None
                     self.destination = None
-                    yield self.hold(3)  # Wait before attempting recovery
+                    
+                    # Wait before recovery attempt to avoid tight retry loops
+                    yield self.hold(3)  
+                    
+                    # Check queue for pending tasks after recovery
+                    if self.task_queue:
+                        logger.info(f"Crane {self.name()} has {len(self.task_queue)} tasks waiting after recovery",
+                                  extra={"component": "crane", "crane_id": self.unit_id})
                     
                     # Atomic state transition
                     with self.state_lock:
                         self.crane_state.set(CraneState.IDLE.value)
                         self.last_state_change = self.env.now()
+                        logger.info(f"Crane {self.name()} recovered to IDLE state",
+                                  extra={"component": "crane", "crane_id": self.unit_id})
                         
                 else:
+                    # Unrecognized state fallback
+                    logger.warning(f"Crane {self.name()} in unrecognized state: {current_state}, resetting to IDLE",
+                                 extra={"component": "crane", "crane_id": self.unit_id})
+                    with self.state_lock:
+                        self.crane_state.set(CraneState.IDLE.value)
+                        self.last_state_change = self.env.now()
                     yield self.hold(1)
                     
                 # Track busy time
@@ -261,22 +382,43 @@ class Crane(sim.Component):
                     self.busy_time += self.env.now() - current_time
                     
             except Exception as e:
-                logger.critical(f"Unhandled exception in {self.name()} process: {e}", exc_info=True)
+                logger.critical(f"Unhandled exception in {self.name()} process: {e}", 
+                              extra={"component": "crane", "crane_id": self.unit_id, "state": self.crane_state.value}, exc_info=True)
                 self.error_count += 1
                 yield self.hold(5)  # Longer hold time after critical errors
                 
-                # Reset to a safe state
+                # Reset to a safe state with full cleanup
                 with self.state_lock:
+                    self.current_ladle = None
+                    self.current_heat = None
+                    self.source = None
+                    self.destination = None
                     self.crane_state.set(CraneState.IDLE.value)
                     self.last_state_change = self.env.now()
+                    logger.info(f"Crane {self.name()} reset to safe state after critical error",
+                              extra={"component": "crane", "crane_id": self.unit_id})
 
     def _handle_error_state(self):
         """Handle transition to error state with proper logging."""
         self.error_count += 1
         with self.state_lock:
+            previous_state = self.crane_state.value
             self.crane_state.set(CraneState.ERROR.value)
             self.last_state_change = self.env.now()
-        logger.warning(f"Crane {self.name()} entered error state (total errors: {self.error_count})")
+        
+        logger.warning(f"Crane {self.name()} entered error state (total errors: {self.error_count})", 
+                      extra={
+                          "component": "crane", 
+                          "crane_id": self.unit_id,
+                          "bay": self.bay,
+                          "previous_state": previous_state, 
+                          "error_count": self.error_count,
+                          "current_ladle": self.current_ladle.id if self.current_ladle else None,
+                          "current_heat": self.current_heat.id if self.current_heat else None,
+                          "source": self.source,
+                          "destination": self.destination,
+                          "position": self.position
+                      })
 
     def assign_task(self, source, destination, priority=0):
         """
@@ -429,7 +571,8 @@ class Crane(sim.Component):
         try:
             return self.spatial_manager.get_unit_position(location)
         except (AttributeError, KeyError) as e:
-            logger.error(f"Error getting position for {location}: {e}", exc_info=True)
+            logger.error(f"Error getting position for {location}: {e}", 
+                       extra={"component": "crane", "location": location}, exc_info=True)
             return {"x": 0, "y": 0}  # Default fallback
 
     def find_unit(self, location):
@@ -450,7 +593,8 @@ class Crane(sim.Component):
         try:
             return self.spatial_manager.get_unit_at_location(location)
         except (AttributeError, KeyError) as e:
-            logger.error(f"Error finding unit at {location}: {e}", exc_info=True)
+            logger.error(f"Error finding unit at {location}: {e}", 
+                       extra={"component": "crane", "location": location}, exc_info=True)
             return None
 
     def is_in_bay(self, location):
@@ -471,7 +615,8 @@ class Crane(sim.Component):
         try:
             return self.spatial_manager.is_unit_in_bay(location, self.bay)
         except Exception as e:
-            logger.error(f"Error checking if {location} is in bay {self.bay}: {e}", exc_info=True)
+            logger.error(f"Error checking if {location} is in bay {self.bay}: {e}", 
+                       extra={"component": "crane", "location": location, "bay": self.bay}, exc_info=True)
             return False  # Fail safe: don't assume in bay on error
 
     def get_utilization(self):

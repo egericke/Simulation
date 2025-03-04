@@ -104,41 +104,132 @@ class SimulationService:
     def reset_simulation(self):
         """
         Reset the simulation to initial state.
-        Returns a new environment and initialized components.
+        Completely reinitializes all major components with the current configuration.
+        Returns a new environment and fully reinitialized service.
         """
-        logger.info("Resetting simulation...")
+        logger.info("Initiating full simulation reset")
+        
+        # Backup the current state for debugging
+        pre_reset_state = {
+            "time": self.env.now() if self.env else 0,
+            "components": {
+                "spatial_manager": self.spatial_manager is not None,
+                "scenario_manager": self.scenario_manager is not None,
+                "transport_manager": self.transport_manager is not None,
+                "ladle_manager": self.ladle_manager is not None,
+                "production_manager": self.production_manager is not None
+            }
+        }
+        logger.debug(f"Pre-reset state: {pre_reset_state}")
         
         # Create new environment (existing one can't be reset)
         import salabim as sim
         new_env = sim.Environment(trace=False)
-        new_env.speed(self.config.get("sim_speed", 1.0))
         
-        # Preserve animation settings
+        # Apply simulation speed and other global settings
+        sim_speed = self.config.get("sim_speed", 1.0)
+        new_env.speed(sim_speed)
+        logger.info(f"Created new simulation environment with speed {sim_speed}")
+        
+        # Preserve animation settings if they exist
         if hasattr(self.env, "animate") and self.env._animate:
             new_env.animate(True)
             new_env.background_color("black")
-            new_env.animation_parameters(
-                width=1200, 
-                height=800,
-                title="Steel Plant Simulation",
-                speed=self.config.get("sim_speed", 1.0),
-                show_fps=True
-            )
+            animation_params = {
+                "width": 1200, 
+                "height": 800,
+                "title": "Steel Plant Simulation",
+                "speed": sim_speed,
+                "show_fps": True
+            }
+            
+            # Copy any custom animation settings from the old environment
+            if hasattr(self.env, "_animation_parameters"):
+                for key, value in self.env._animation_parameters.items():
+                    animation_params[key] = value
+                    
+            new_env.animation_parameters(**animation_params)
+            logger.info(f"Preserved animation settings: {animation_params}")
         
-        # Create a new service instance with the new environment
-        new_service = SimulationService(self.config, new_env)
-        
-        # Initialize transport systems
-        new_service.initialize_transport_systems()
-        
-        # Preserve config file path
-        new_service.config_file_path = self.config_file_path
-        
-        # Recreate key managers
-        new_service.scenario_manager = ScenarioManager(self.config)
-        
-        logger.info("Simulation reset complete")
-        return new_env, new_service
+        # Create a completely new service instance
+        try:
+            # First validate config to ensure we're not carrying over bad data
+            self._validate_config(self.config)
+            
+            # Create new service with validated config
+            new_service = SimulationService(self.config, new_env)
+            logger.info("Created new simulation service")
+            
+            # Explicitly create new spatial manager
+            new_service.spatial_manager = SpatialManager(self.config)
+            logger.info("SpatialManager reinitialized")
+            
+            # Create new scenario manager with clean state
+            new_service.scenario_manager = ScenarioManager(self.config)
+            logger.info("ScenarioManager reinitialized")
+            
+            # Initialize transport systems (creates transport_manager and ladle_manager)
+            success = new_service.initialize_transport_systems()
+            if not success:
+                logger.error("Failed to initialize transport systems during reset")
+                raise RuntimeError("Transport system initialization failed")
+                
+            logger.info("Transport systems reinitialized")
+            
+            # If production manager exists in current service, recreate it
+            if self.production_manager:
+                from production_manager import ProductionManager
+                new_service.production_manager = ProductionManager(
+                    new_env, 
+                    self.config, 
+                    new_service.spatial_manager,
+                    new_service.transport_manager, 
+                    new_service.ladle_manager
+                )
+                logger.info("ProductionManager reinitialized")
+            
+            # Transfer any additional properties that should be preserved
+            if hasattr(self, "layer_manager") and self.layer_manager:
+                new_service.layer_manager = self.layer_manager
+                logger.info("Preserved layer manager reference")
+                
+            if hasattr(self, "bottleneck_analyzer") and self.bottleneck_analyzer:
+                # Recreate bottleneck analyzer with new environment references
+                from bottleneck_analyzer import BottleneckAnalyzer
+                new_service.bottleneck_analyzer = BottleneckAnalyzer(
+                    new_env, new_service.transport_manager, new_service.production_manager
+                )
+                logger.info("BottleneckAnalyzer reinitialized")
+                
+            # Preserve config file path for saving
+            new_service.config_file_path = self.config_file_path
+            
+            # Verify all components were properly initialized
+            post_reset_components = {
+                "spatial_manager": new_service.spatial_manager is not None,
+                "scenario_manager": new_service.scenario_manager is not None,
+                "transport_manager": new_service.transport_manager is not None,
+                "ladle_manager": new_service.ladle_manager is not None
+            }
+            
+            # Check for any components that should exist but don't
+            missing_components = [key for key, value in post_reset_components.items() 
+                                 if not value and pre_reset_state["components"].get(key, False)]
+            
+            if missing_components:
+                logger.error(f"Failed to initialize components during reset: {missing_components}")
+                raise RuntimeError(f"Failed to initialize: {', '.join(missing_components)}")
+                
+            logger.info("Simulation reset completed successfully")
+            return new_env, new_service
+            
+        except Exception as e:
+            logger.critical(f"Critical error during simulation reset: {e}", exc_info=True)
+            # Create minimal service as fallback
+            fallback_service = SimulationService(self.config, new_env)
+            fallback_service.config_file_path = self.config_file_path
+            logger.warning("Created minimal fallback service after reset failure")
+            return new_env, fallback_service
     
     def update_config(self, new_config, section=None):
         """

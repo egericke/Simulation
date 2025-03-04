@@ -606,46 +606,181 @@ class PlacementPage(QWizardPage):
         logger.info(f"Auto-positioned {row} equipment units across {len(bays)} bays")
 
     def validatePage(self):
-        """Validate the equipment positions.
+        """Validate the equipment positions with comprehensive validation.
 
         Returns:
             bool: True if valid, False otherwise.
         """
+        # Initialize new equipment positions
         self.config["equipment_positions"] = {}
+        
+        # Track bays and their equipment counts for capacity checks
+        bay_equipment_counts = {}
+        unit_types_per_bay = {}
+        
+        # First pass: collect data and verify basic formats
         for row in range(self.position_table.rowCount()):
             items = [self.position_table.item(row, col) for col in range(5)]
             if not all(items):
                 logger.warning(f"Missing data in row {row}")
                 QMessageBox.warning(self, "Invalid Input", f"Missing data in row {row}.")
                 return False
+                
             bay, unit_type, unit_id, x_str, y_str = [item.text() for item in items]
-            try:
-                x, y = float(x_str), float(y_str)
-                unit_id = int(unit_id)
-                
-                # Check if bay exists
-                if bay not in self.config["bays"]:
-                    logger.error(f"Bay '{bay}' does not exist")
-                    QMessageBox.warning(self, "Invalid Bay", f"Bay '{bay}' does not exist.")
-                    return False
-                    
-                # Check if position is within bay
-                position = {"x": x, "y": y}
-                if not is_position_in_bay(position, self.config["bays"][bay]):
-                    logger.error(f"Position ({x}, {y}) is outside of bay '{bay}'")
-                    QMessageBox.warning(self, "Invalid Position", 
-                                      f"Position ({x}, {y}) is outside of bay '{bay}'.")
-                    return False
-                
-                key = f"{unit_type}_{unit_id}_{bay}"
-                self.config["equipment_positions"][key] = {
-                    "bay": bay, "type": unit_type, "id": unit_id, "x": x, "y": y
-                }
-            except ValueError as e:
-                logger.error(f"Invalid position in row {row}: {e}", exc_info=True)
-                QMessageBox.warning(self, "Invalid Input", f"Invalid position in row {row}: {e}")
+            
+            # Validate bay name is not empty
+            if not bay:
+                logger.error(f"Bay name cannot be empty in row {row}")
+                QMessageBox.warning(self, "Invalid Input", "Bay name cannot be empty.")
                 return False
-        logger.info("Equipment positions validated successfully")
+                
+            # Check bay existence
+            if bay not in self.config["bays"]:
+                logger.error(f"Bay '{bay}' does not exist")
+                QMessageBox.warning(self, "Invalid Bay", f"Bay '{bay}' does not exist.")
+                return False
+            
+            # Initialize tracking for this bay if needed
+            if bay not in bay_equipment_counts:
+                bay_equipment_counts[bay] = 0
+                unit_types_per_bay[bay] = set()
+            
+            # Track counts
+            bay_equipment_counts[bay] += 1
+            unit_types_per_bay[bay].add(unit_type)
+        
+        # Verify that bays don't contain incompatible equipment
+        incompatible_types = {
+            "EAF": ["Caster"],
+            "Caster": ["EAF"]
+        }
+        
+        for bay, unit_types in unit_types_per_bay.items():
+            for unit_type in unit_types:
+                if unit_type in incompatible_types:
+                    for incompatible in incompatible_types[unit_type]:
+                        if incompatible in unit_types:
+                            err_msg = f"Bay '{bay}' contains incompatible equipment types: {unit_type} and {incompatible}"
+                            logger.error(err_msg)
+                            QMessageBox.warning(self, "Incompatible Equipment", err_msg)
+                            return False
+        
+        # Second pass: process and validate each equipment entry
+        for row in range(self.position_table.rowCount()):
+            items = [self.position_table.item(row, col) for col in range(5)]
+            bay, unit_type, unit_id, x_str, y_str = [item.text() for item in items]
+            
+            try:
+                # Validate numeric values with more specific errors
+                try:
+                    x = float(x_str)
+                    if x < 0:
+                        raise ValueError(f"X position must be positive, got {x}")
+                except ValueError:
+                    raise ValueError(f"X position must be a valid number, got '{x_str}'")
+                
+                try:
+                    y = float(y_str)
+                    if y < 0:
+                        raise ValueError(f"Y position must be positive, got {y}")
+                except ValueError:
+                    raise ValueError(f"Y position must be a valid number, got '{y_str}'")
+                
+                try:
+                    unit_id = int(unit_id)
+                    if unit_id < 0:
+                        raise ValueError(f"Unit ID must be positive, got {unit_id}")
+                except ValueError:
+                    raise ValueError(f"Unit ID must be an integer, got '{unit_id}'")
+                
+                # Check position is in bay with clear error message
+                position = {"x": x, "y": y}
+                bay_data = self.config["bays"][bay]
+                if not is_position_in_bay(position, bay_data):
+                    err_msg = f"Position ({x}, {y}) is outside bay '{bay}' boundaries: "
+                    err_msg += f"x={bay_data['x']} to {bay_data['x'] + bay_data['width']}, "
+                    err_msg += f"y={bay_data['y']} to {bay_data['y'] + bay_data['height']}"
+                    logger.error(err_msg)
+                    QMessageBox.warning(self, "Invalid Position", err_msg)
+                    return False
+                
+                # Check for duplicate equipment IDs in the same bay
+                key = f"{unit_type}_{unit_id}_{bay}"
+                for existing_key in self.config["equipment_positions"]:
+                    existing_data = self.config["equipment_positions"][existing_key]
+                    if (existing_data["type"] == unit_type and 
+                        existing_data["id"] == unit_id and 
+                        existing_data["bay"] == bay):
+                        err_msg = f"Duplicate equipment: {unit_type} with ID {unit_id} already exists in bay '{bay}'"
+                        logger.error(err_msg)
+                        QMessageBox.warning(self, "Duplicate Equipment", err_msg)
+                        return False
+                
+                # Check for equipment collisions (equipment too close to each other)
+                min_distance = 10  # Minimum distance between equipment
+                new_pos = (x, y)
+                for existing_key, existing_data in self.config["equipment_positions"].items():
+                    if existing_data["bay"] == bay:  # Only check within the same bay
+                        ex_pos = (existing_data["x"], existing_data["y"])
+                        distance = ((new_pos[0] - ex_pos[0]) ** 2 + (new_pos[1] - ex_pos[1]) ** 2) ** 0.5
+                        if distance < min_distance:
+                            err_msg = f"Equipment at ({x}, {y}) is too close to existing equipment at ({ex_pos[0]}, {ex_pos[1]})"
+                            logger.warning(err_msg)
+                            response = QMessageBox.question(
+                                self, "Equipment Collision",
+                                f"{err_msg}\nMinimum distance should be {min_distance} units.\nContinue anyway?",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                            )
+                            if response == QMessageBox.No:
+                                return False
+                
+                # If all checks pass, add the equipment position
+                self.config["equipment_positions"][key] = {
+                    "bay": bay, 
+                    "type": unit_type, 
+                    "id": unit_id, 
+                    "x": x, 
+                    "y": y
+                }
+                
+            except ValueError as e:
+                logger.error(f"Invalid data in row {row}: {e}", exc_info=True)
+                QMessageBox.warning(self, "Invalid Input", f"Invalid data in row {row}: {e}")
+                return False
+        
+        # Check bay capacity limits (optional warning)
+        max_equipment_per_bay = 10  # Reasonable maximum for performance
+        for bay, count in bay_equipment_counts.items():
+            if count > max_equipment_per_bay:
+                logger.warning(f"Bay '{bay}' has {count} equipment items, which may impact performance")
+                response = QMessageBox.question(
+                    self, "Bay Capacity Warning",
+                    f"Bay '{bay}' has {count} equipment items, which exceeds the recommended limit of {max_equipment_per_bay}.\n"
+                    "This may impact simulation performance.\nContinue anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+                )
+                if response == QMessageBox.No:
+                    return False
+        
+        # Ensure required production equipment types exist
+        required_types = {"EAF", "LMF", "Degasser", "Caster"}
+        found_types = set()
+        for pos in self.config["equipment_positions"].values():
+            found_types.add(pos["type"])
+        
+        missing_types = required_types - found_types
+        if missing_types:
+            logger.warning(f"Missing required equipment types: {', '.join(missing_types)}")
+            response = QMessageBox.question(
+                self, "Missing Equipment Types",
+                f"The following required equipment types are missing: {', '.join(missing_types)}.\n"
+                "This may prevent the simulation from running correctly.\nContinue anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if response == QMessageBox.No:
+                return False
+        
+        logger.info(f"Equipment positions validated successfully: {len(self.config['equipment_positions'])} items in {len(bay_equipment_counts)} bays")
         return True
 
 
