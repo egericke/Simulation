@@ -23,10 +23,16 @@ class SimulationConfig:
         """
         self.config_path = config_path
         self.config = self._get_default_config()
+        self.last_config_path = "last_config.json"
         
-        # Load configuration from file if provided
+        # Try to load configuration from different sources with fallbacks
         if config_path and os.path.exists(config_path):
             self.load_config(config_path)
+        elif os.path.exists(self.last_config_path):
+            logger.info(f"Loading last used configuration from {self.last_config_path}")
+            self.load_config(self.last_config_path)
+            # Update the config_path to point to the last config
+            self.config_path = self.last_config_path
     
     def _get_default_config(self):
         """Get the default simulation configuration."""
@@ -181,7 +187,12 @@ class SimulationConfig:
                 "ladle_car_color": "#9467bd",  # Purple for ladle cars
                 "crane_color": "#8c564b",      # Brown for cranes
                 "scale_factor": 0.5            # Scaling factor for visualization
-            }
+            },
+            
+            # Background settings
+            "background_type": "image",  # Default to 'image' instead of 'grid' or 'pdf'
+            "background_image": None,    # Path to background image file
+            "cad_file_path": None,      # CAD file path (PDF, DXF, etc.)
         }
     
     def load_config(self, config_path):
@@ -201,6 +212,9 @@ class SimulationConfig:
             # Update configuration
             self.config.update(loaded_config)
             logger.info(f"Configuration loaded from {config_path}")
+            
+            # Save this as the last used configuration
+            self.save_config(self.last_config_path)
             
             return self.config
         except Exception as e:
@@ -223,10 +237,22 @@ class SimulationConfig:
             return False
             
         try:
+            # Create parent directory if it doesn't exist
+            dir_path = os.path.dirname(save_path)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+                
             with open(save_path, 'w') as f:
                 json.dump(self.config, f, indent=4)
                 
             logger.info(f"Configuration saved to {save_path}")
+            
+            # If this isn't the last_config_path, also save to last_config
+            if save_path != self.last_config_path:
+                with open(self.last_config_path, 'w') as f:
+                    json.dump(self.config, f, indent=4)
+                logger.info(f"Configuration backed up to {self.last_config_path}")
+                
             return True
         except Exception as e:
             logger.error(f"Error saving configuration: {str(e)}")
@@ -258,6 +284,8 @@ class SimulationConfig:
         """
         try:
             self.config[key] = value
+            # Auto-save when settings change
+            self.save_config(self.last_config_path)
             return True
         except Exception as e:
             logger.error(f"Error setting configuration: {str(e)}")

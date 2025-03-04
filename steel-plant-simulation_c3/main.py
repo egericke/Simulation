@@ -28,7 +28,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QTabWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QPushButton, QLabel, QMessageBox, QSplashScreen, QProgressBar, QFileDialog, QFrame,
-    QWizard
+    QWizard, QDialog, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QGroupBox, QGridLayout
 )
 from PyQt5.QtCore import Qt, QTimer, QMutex, QThread, pyqtSignal
 from PyQt5.QtGui import QPalette, QColor, QPixmap, QIcon, QImage
@@ -67,7 +67,6 @@ try:
     from cad_integration import CADBackground
     from production_manager import ProductionManager
     from equipment.ladle_car import BaseLadleCar
-    from setup_wizard import SetupWizard
     from equipment_layout_editor import show_equipment_layout_editor
     from production_settings import show_production_settings_dialog
     from oda_file_converter import show_conversion_dialog
@@ -129,22 +128,34 @@ class LoadingThread(QThread):
             self.progress_signal.emit(30, "Setting up visualization layers...")
             layer_manager = LayerManager(env)
 
-            self.progress_signal.emit(40, "Loading CAD background...")
-            # Enhanced CAD background initialization with better error handling
+            self.progress_signal.emit(40, "Loading background...")
+            # Enhanced background initialization with better error handling
             cad_background = None
             try:
+                # Check background type preference
+                background_type = self.config.get("background_type", "image")
+                background_image = self.config.get("background_image")
                 cad_file_path = self.config.get("cad_file_path")
-                if cad_file_path and os.path.exists(cad_file_path):
+                
+                if background_type == "image" and background_image and os.path.exists(background_image):
+                    self.progress_signal.emit(40, f"Loading image background from {os.path.basename(background_image)}...")
+                    cad_background = CADBackground(env, layer_manager, self.config)
+                    logger.info(f"Loaded image background from {background_image}")
+                elif background_type == "pdf" and cad_file_path and os.path.exists(cad_file_path) and cad_file_path.lower().endswith('.pdf'):
+                    self.progress_signal.emit(40, f"Loading PDF background from {os.path.basename(cad_file_path)}...")
+                    cad_background = CADBackground(env, layer_manager, self.config)
+                    logger.info(f"Loaded PDF background from {cad_file_path}")
+                elif background_type == "cad" and cad_file_path and os.path.exists(cad_file_path):
                     self.progress_signal.emit(40, f"Loading CAD background from {os.path.basename(cad_file_path)}...")
                     cad_background = CADBackground(env, layer_manager, self.config)
                     logger.info(f"Loaded CAD background from {cad_file_path}")
                 else:
-                    self.progress_signal.emit(40, "No CAD file specified, using default grid...")
+                    self.progress_signal.emit(40, "Using default grid background...")
                     cad_background = CADBackground(env, layer_manager, self.config)
                     logger.info("Using default grid background")
             except Exception as e:
-                logger.error(f"Error loading CAD background: {e}")
-                self.progress_signal.emit(40, "Error loading CAD, using default grid...")
+                logger.error(f"Error loading background: {e}")
+                self.progress_signal.emit(40, "Error loading background, using default grid...")
                 # Create a basic CADBackground with default grid
                 cad_background = CADBackground(env, layer_manager, self.config)
 
@@ -185,6 +196,309 @@ class LoadingThread(QThread):
         except Exception as e:
             logger.error(f"Initialization error: {e}", exc_info=True)
             self.error_signal.emit(str(e))
+
+class ConfigPanel(QWidget):
+    """Panel for simulation configuration settings."""
+    
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.parent_app = parent
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize the configuration UI."""
+        layout = QVBoxLayout(self)
+        
+        # Create configuration categories
+        categories = [
+            self.create_simulation_settings(),
+            self.create_equipment_settings(),
+            self.create_visualization_settings(),
+            self.create_background_settings()
+        ]
+        
+        # Add each category to the layout
+        for category in categories:
+            layout.addWidget(category)
+            
+        # Add spacer at the bottom
+        layout.addStretch()
+        
+        # Add apply button at the bottom
+        apply_btn = QPushButton("Apply Settings")
+        apply_btn.clicked.connect(self.apply_settings)
+        layout.addWidget(apply_btn)
+
+    def create_simulation_settings(self):
+        """Create simulation settings section."""
+        group = QGroupBox("Simulation Settings")
+        layout = QGridLayout()
+        row = 0
+        
+        # Simulation time
+        layout.addWidget(QLabel("Simulation time (min):"), row, 0)
+        self.sim_time_spin = QSpinBox()
+        self.sim_time_spin.setRange(60, 10080)  # 1 hour to 7 days
+        self.sim_time_spin.setValue(self.config.get("simulation_time", 1440))
+        layout.addWidget(self.sim_time_spin, row, 1)
+        row += 1
+        
+        # Heat generation interval
+        layout.addWidget(QLabel("Heat interval (min):"), row, 0)
+        self.heat_interval_spin = QSpinBox()
+        self.heat_interval_spin.setRange(5, 240)
+        self.heat_interval_spin.setValue(self.config.get("heat_generation_interval", 60))
+        layout.addWidget(self.heat_interval_spin, row, 1)
+        row += 1
+        
+        # Maximum heats
+        layout.addWidget(QLabel("Maximum heats:"), row, 0)
+        self.max_heats_spin = QSpinBox()
+        self.max_heats_spin.setRange(1, 1000)
+        self.max_heats_spin.setValue(self.config.get("max_heats", 50))
+        layout.addWidget(self.max_heats_spin, row, 1)
+        row += 1
+        
+        # Simulation speed
+        layout.addWidget(QLabel("Simulation speed:"), row, 0)
+        self.sim_speed_spin = QDoubleSpinBox()
+        self.sim_speed_spin.setRange(0.1, 100.0)
+        self.sim_speed_spin.setValue(self.config.get("sim_speed", 1.0))
+        self.sim_speed_spin.setSingleStep(0.5)
+        layout.addWidget(self.sim_speed_spin, row, 1)
+        
+        group.setLayout(layout)
+        return group
+        
+    def create_equipment_settings(self):
+        """Create equipment settings section."""
+        group = QGroupBox("Equipment Settings")
+        layout = QGridLayout()
+        row = 0
+        
+        # Number of units per equipment type
+        equipment_types = [
+            ("EAF", "n_eaf_per_bay", 1, 5),
+            ("LMF", "n_lmf_per_bay", 1, 5),
+            ("Degasser", "n_degassers_per_bay", 0, 3),
+            ("Caster", "n_casters_per_bay", 1, 3)
+        ]
+        
+        self.equipment_spins = {}
+        for label, config_key, min_val, max_val in equipment_types:
+            layout.addWidget(QLabel(f"{label} per bay:"), row, 0)
+            spin = QSpinBox()
+            spin.setRange(min_val, max_val)
+            spin.setValue(self.config.get(config_key, min_val))
+            layout.addWidget(spin, row, 1)
+            self.equipment_spins[config_key] = spin
+            row += 1
+            
+        # Number of ladles
+        layout.addWidget(QLabel("Number of ladles:"), row, 0)
+        self.ladles_spin = QSpinBox()
+        self.ladles_spin.setRange(3, 30)
+        self.ladles_spin.setValue(self.config.get("n_ladles", 12))
+        layout.addWidget(self.ladles_spin, row, 1)
+        row += 1
+        
+        # Number of ladle cars
+        layout.addWidget(QLabel("Number of ladle cars:"), row, 0)
+        self.ladle_cars_spin = QSpinBox()
+        self.ladle_cars_spin.setRange(1, 10)
+        self.ladle_cars_spin.setValue(self.config.get("n_ladle_cars", 3))
+        layout.addWidget(self.ladle_cars_spin, row, 1)
+        row += 1
+        
+        # Number of cranes per bay
+        layout.addWidget(QLabel("Cranes per bay:"), row, 0)
+        self.cranes_spin = QSpinBox()
+        self.cranes_spin.setRange(1, 5)
+        self.cranes_spin.setValue(self.config.get("n_cranes_per_bay", 2))
+        layout.addWidget(self.cranes_spin, row, 1)
+        
+        group.setLayout(layout)
+        return group
+        
+    def create_visualization_settings(self):
+        """Create visualization settings section."""
+        group = QGroupBox("Visualization Settings")
+        layout = QGridLayout()
+        row = 0
+        
+        # Show FPS
+        layout.addWidget(QLabel("Show FPS:"), row, 0)
+        self.show_fps_check = QCheckBox()
+        self.show_fps_check.setChecked(True)
+        layout.addWidget(self.show_fps_check, row, 1)
+        row += 1
+        
+        # Animation width
+        layout.addWidget(QLabel("Animation width:"), row, 0)
+        self.anim_width_spin = QSpinBox()
+        self.anim_width_spin.setRange(800, 3000)
+        self.anim_width_spin.setValue(self.config.get("animation_width", 1200))
+        layout.addWidget(self.anim_width_spin, row, 1)
+        row += 1
+        
+        # Animation height
+        layout.addWidget(QLabel("Animation height:"), row, 0)
+        self.anim_height_spin = QSpinBox()
+        self.anim_height_spin.setRange(600, 2000)
+        self.anim_height_spin.setValue(self.config.get("animation_height", 800))
+        layout.addWidget(self.anim_height_spin, row, 1)
+        row += 1
+        
+        # Show grid overlay
+        layout.addWidget(QLabel("Show grid overlay:"), row, 0)
+        self.grid_overlay_check = QCheckBox()
+        self.grid_overlay_check.setChecked(self.config.get("show_grid_overlay", True))
+        layout.addWidget(self.grid_overlay_check, row, 1)
+        
+        group.setLayout(layout)
+        return group
+        
+    def create_background_settings(self):
+        """Create background settings section."""
+        group = QGroupBox("Background Settings")
+        layout = QGridLayout()
+        row = 0
+        
+        # Background type selection
+        layout.addWidget(QLabel("Background type:"), row, 0)
+        self.bg_type_combo = QComboBox()
+        self.bg_type_combo.addItem("Image", "image")
+        self.bg_type_combo.addItem("CAD Drawing", "cad")
+        self.bg_type_combo.addItem("PDF", "pdf")
+        self.bg_type_combo.addItem("Grid", "grid")
+        
+        # Set current selection based on config
+        bg_type = self.config.get("background_type", "image")
+        index = self.bg_type_combo.findData(bg_type)
+        if index >= 0:
+            self.bg_type_combo.setCurrentIndex(index)
+            
+        layout.addWidget(self.bg_type_combo, row, 1)
+        row += 1
+        
+        # Background image path
+        layout.addWidget(QLabel("Background image:"), row, 0)
+        self.bg_image_layout = QHBoxLayout()
+        self.bg_image_label = QLabel(self.config.get("background_image", "None"))
+        self.bg_image_label.setWordWrap(True)
+        self.bg_image_btn = QPushButton("Browse...")
+        self.bg_image_btn.clicked.connect(self.browse_background_image)
+        self.bg_image_layout.addWidget(self.bg_image_label)
+        self.bg_image_layout.addWidget(self.bg_image_btn)
+        layout.addLayout(self.bg_image_layout, row, 1)
+        row += 1
+        
+        # CAD file path
+        layout.addWidget(QLabel("CAD/PDF file:"), row, 0)
+        self.cad_layout = QHBoxLayout()
+        self.cad_label = QLabel(self.config.get("cad_file_path", "None"))
+        self.cad_label.setWordWrap(True)
+        self.cad_btn = QPushButton("Browse...")
+        self.cad_btn.clicked.connect(self.browse_cad_file)
+        self.cad_layout.addWidget(self.cad_label)
+        self.cad_layout.addWidget(self.cad_btn)
+        layout.addLayout(self.cad_layout, row, 1)
+        row += 1
+        
+        # Grid size
+        layout.addWidget(QLabel("Grid size:"), row, 0)
+        self.grid_size_spin = QSpinBox()
+        self.grid_size_spin.setRange(10, 500)
+        self.grid_size_spin.setValue(self.config.get("grid_size", 100))
+        layout.addWidget(self.grid_size_spin, row, 1)
+        
+        group.setLayout(layout)
+        return group
+        
+    def browse_background_image(self):
+        """Open file dialog to select background image."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Background Image", "", 
+            "Image Files (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if file_path:
+            self.bg_image_label.setText(file_path)
+            self.config["background_image"] = file_path
+            # Auto select image background type
+            index = self.bg_type_combo.findData("image")
+            if index >= 0:
+                self.bg_type_combo.setCurrentIndex(index)
+    
+    def browse_cad_file(self):
+        """Open file dialog to select CAD or PDF file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select CAD or PDF File", "", 
+            "Supported Files (*.pdf *.dxf *.dwg *.svg);;PDF Files (*.pdf);;DXF Files (*.dxf);;DWG Files (*.dwg);;SVG Files (*.svg)"
+        )
+        if file_path:
+            self.cad_label.setText(file_path)
+            self.config["cad_file_path"] = file_path
+            # Auto select appropriate background type based on extension
+            bg_type = "cad"
+            if file_path.lower().endswith('.pdf'):
+                bg_type = "pdf"
+            index = self.bg_type_combo.findData(bg_type)
+            if index >= 0:
+                self.bg_type_combo.setCurrentIndex(index)
+    
+    def apply_settings(self):
+        """Apply all settings to the configuration."""
+        # Simulation settings
+        self.config["simulation_time"] = self.sim_time_spin.value()
+        self.config["heat_generation_interval"] = self.heat_interval_spin.value()
+        self.config["max_heats"] = self.max_heats_spin.value()
+        self.config["sim_speed"] = self.sim_speed_spin.value()
+        
+        # Equipment settings
+        for key, spin in self.equipment_spins.items():
+            self.config[key] = spin.value()
+        self.config["n_ladles"] = self.ladles_spin.value()
+        self.config["n_ladle_cars"] = self.ladle_cars_spin.value()
+        self.config["n_cranes_per_bay"] = self.cranes_spin.value()
+        
+        # Visualization settings
+        anim_settings = self.config.get("_animation_settings", {})
+        anim_settings["show_fps"] = self.show_fps_check.isChecked()
+        anim_settings["width"] = self.anim_width_spin.value()
+        anim_settings["height"] = self.anim_height_spin.value()
+        self.config["_animation_settings"] = anim_settings
+        self.config["show_grid_overlay"] = self.grid_overlay_check.isChecked()
+        
+        # Background settings
+        self.config["background_type"] = self.bg_type_combo.currentData()
+        self.config["grid_size"] = self.grid_size_spin.value()
+        
+        # Save configuration
+        self.save_configuration()
+        
+        # Show confirmation
+        QMessageBox.information(self, "Settings Applied", 
+                               "Configuration saved. Changes will take effect when the simulation is restarted.")
+    
+    def save_configuration(self):
+        """Save configuration to file."""
+        try:
+            # Create a SimulationConfig object to handle saving
+            config_manager = SimulationConfig(self.config.get("config_path", "config.json"))
+            # Update with our current config
+            config_manager.config.update(self.config)
+            # Save to file
+            config_manager.save_config()
+            logger.info("Configuration saved successfully")
+            
+            # If parent app exists, update its config too
+            if hasattr(self, 'parent_app') and self.parent_app and hasattr(self.parent_app, 'config'):
+                self.parent_app.config.update(self.config)
+                
+        except Exception as e:
+            logger.error(f"Error saving configuration: {e}")
+            QMessageBox.warning(self, "Save Error", f"Failed to save configuration: {str(e)}")
 
 class SimulationApp(QMainWindow):
     """Main application window for the simulation."""
@@ -263,15 +577,29 @@ class SimulationApp(QMainWindow):
         main_layout.addLayout(toolbar)
 
         self.tab_widget = QTabWidget()
+        
+        # Main simulation tab
         self.simulation_tab = QWidget()
         self.simulation_layout = QVBoxLayout(self.simulation_tab)
         self.tab_widget.addTab(self.simulation_tab, "Simulation")
+        
+        # Dashboard tab
         self.dashboard_tab = QWidget()
         self.dashboard_layout = QVBoxLayout(self.dashboard_tab)
         self.tab_widget.addTab(self.dashboard_tab, "Dashboard")
+        
+        # Analytics tab
         self.analytics_tab = QWidget()
         self.analytics_layout = QVBoxLayout(self.analytics_tab)
         self.tab_widget.addTab(self.analytics_tab, "Analytics")
+        
+        # Configuration tab (replaces setup wizard)
+        self.config_tab = QWidget()
+        self.config_layout = QVBoxLayout(self.config_tab)
+        self.config_panel = ConfigPanel(self.config, self)
+        self.config_layout.addWidget(self.config_panel)
+        self.tab_widget.addTab(self.config_tab, "Configuration")
+        
         main_layout.addWidget(self.tab_widget)
 
         self.status_label = QLabel("Ready")
@@ -281,19 +609,28 @@ class SimulationApp(QMainWindow):
     def _create_toolbar(self):
         """Create the toolbar with control buttons."""
         toolbar_layout = QHBoxLayout()
-        buttons = [
-            ("Setup", "document-new", self.show_setup_wizard),
-            ("Equipment Layout", "preferences-system", self.show_equipment_layout),
-            ("Production Settings", "preferences-desktop", self.show_production_settings),
-            ("Load CAD", "document-open", self.show_cad_import)
-        ]
-        for text, icon, slot in buttons:
-            btn = QPushButton(text)
-            btn.setIcon(QIcon.fromTheme(icon))
-            btn.clicked.connect(slot)
-            toolbar_layout.addWidget(btn)
+        
+        # Equipment Layout button
+        equipment_btn = QPushButton("Equipment Layout")
+        equipment_btn.setIcon(QIcon.fromTheme("preferences-system"))
+        equipment_btn.clicked.connect(self.show_equipment_layout)
+        toolbar_layout.addWidget(equipment_btn)
+        
+        # Production Settings button
+        production_btn = QPushButton("Production Settings")
+        production_btn.setIcon(QIcon.fromTheme("preferences-desktop"))
+        production_btn.clicked.connect(self.show_production_settings)
+        toolbar_layout.addWidget(production_btn)
+        
+        # Load CAD button
+        cad_btn = QPushButton("Load CAD")
+        cad_btn.setIcon(QIcon.fromTheme("document-open"))
+        cad_btn.clicked.connect(self.show_cad_import)
+        toolbar_layout.addWidget(cad_btn)
 
         toolbar_layout.addStretch()
+        
+        # Simulation control buttons
         self.run_button = self._create_button("Run", "media-playback-start", self.toggle_simulation, False)
         self.step_button = self._create_button("Step", "media-skip-forward", self.step_simulation, False)
         self.reset_button = self._create_button("Reset", "media-playback-stop", self.reset_simulation, False)
@@ -382,8 +719,7 @@ class SimulationApp(QMainWindow):
                     if hasattr(self, 'update_embedded_animation'):
                         self.update_embedded_animation()
                     
-                    QMessageBox.information(self, "Background Loaded", 
-                                        f"Loaded bitmap background from {os.path.basename(bg_image_path)}")
+                    logger.info(f"Loaded bitmap background from {os.path.basename(bg_image_path)}")
                     return True
                 except Exception as e:
                     logger.warning(f"Error loading bitmap image with matplotlib: {e}")
@@ -406,8 +742,7 @@ class SimulationApp(QMainWindow):
                                 if hasattr(self, 'update_embedded_animation'):
                                     self.update_embedded_animation()
                                 
-                                QMessageBox.information(self, "Background Loaded", 
-                                                    f"Loaded bitmap background from {os.path.basename(bg_image_path)}")
+                                logger.info(f"Loaded bitmap background from {os.path.basename(bg_image_path)}")
                                 return True
                     except Exception as e:
                         logger.warning(f"Error loading bitmap image with Qt: {e}")
@@ -453,10 +788,6 @@ class SimulationApp(QMainWindow):
                         if hasattr(self, 'update_embedded_animation'):
                             self.update_embedded_animation()
                         
-                        # Report success
-                        QMessageBox.information(self, "PDF Background Loaded", 
-                                            f"Loaded PDF background from {os.path.basename(cad_file_path)}")
-                                            
                         return True
                 except Exception as e:
                     logger.warning(f"PyMuPDF approach failed: {e}")
@@ -840,7 +1171,7 @@ class SimulationApp(QMainWindow):
             # Initialize with some text
             self.ax.text(600, 400, "Animation Ready", color='white', fontsize=24, 
                        ha='center', va='center')
-            self.ax.text(600, 350, "Click 'Toggle Animation' and 'Run' to start", 
+            self.ax.text(600, 350, "Click 'Run' to start", 
                        color='white', fontsize=16, ha='center', va='center')
             
             # Update the canvas
@@ -982,45 +1313,13 @@ class SimulationApp(QMainWindow):
                                 "1. Embedded Animation: Active by default in the main window\n"
                                 "2. Toggle Animation: Turn animation on/off\n"
                                 "3. Run: Start the simulation with animation\n\n"
-                                "CAD Background:\n"
-                                "- CAD files are loaded when imported via 'Load CAD' button\n"
-                                "- The background should appear in the animation automatically\n"
-                                "- CAD elements may include lines, rectangles, and other shapes\n\n"
+                                "Background Options:\n"
+                                "- Images, CAD files, and PDFs can be configured in the Configuration tab\n"
+                                "- The background type can be set to 'image', 'cad', 'pdf', or 'grid'\n\n"
                                 "If you experience any issues with the animation:\n"
                                 "- Try resetting the simulation\n"
                                 "- Disable animation for better performance\n"
                                 "- Check logs for detailed error messages")
-
-    def show_setup_wizard(self):
-        """Show the setup wizard for configuration."""
-        try:
-            # QMutex doesn't support context managers, so use lock/unlock explicitly
-            self.config_mutex.lock()
-            try:
-                # Create a copy of the config for the wizard
-                config_copy = self.config.copy()
-                
-                # Create and run the wizard
-                wizard = SetupWizard(config_copy, self.env, self.sim_service, self.layer_manager, self)
-                result = wizard.exec_()
-                
-                # If the wizard was accepted, update the config
-                if result == QWizard.Accepted:
-                    # Update the config with the wizard's changes
-                    self.config.update(config_copy)
-                    
-                    # Save the config
-                    with open('config.json', 'w') as f:
-                        json.dump(self.config, f, indent=2)
-                        
-                    # Reload the simulation (if needed)
-                    # self.reset_simulation()  # Uncomment if you want to auto-reset
-            finally:
-                # Always unlock the mutex
-                self.config_mutex.unlock()
-        except Exception as e:
-            logger.error(f"Error in setup wizard: {e}", exc_info=True)
-            QMessageBox.critical(self, "Error", f"Setup wizard error: {e}")
 
     def show_equipment_layout(self):
         """Show equipment layout editor."""

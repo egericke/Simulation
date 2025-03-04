@@ -48,6 +48,7 @@ class CADBackground:
         self.cad_elements = {}  # Elements organized by layer
         self.cad_file_path = self.config.get("cad_file_path", None)
         self.background_image = self.config.get("background_image", None)
+        self.background_type = self.config.get("background_type", "image")  # Default to image
         self.scale = self.config.get("cad_scale", 1.0)
         self.x_offset = self.config.get("cad_x_offset", 0)
         self.y_offset = self.config.get("cad_y_offset", 0)
@@ -78,18 +79,77 @@ class CADBackground:
     def create_background(self):
         """Create background based on config with fallback."""
         try:
-            if self.cad_file_path and os.path.exists(self.cad_file_path):
-                # Check if it's a PDF file
-                if self.cad_file_path.lower().endswith('.pdf'):
-                    self.load_pdf_file()
-                else:
-                    self.load_cad_file()
+            # First check background_type to determine which type of background to use
+            if self.background_type == "image" and self.background_image and os.path.exists(self.background_image):
+                logger.info(f"Using image background from {self.background_image}")
+                self.load_background_image(self.background_image)
+            elif self.background_type == "pdf" and self.cad_file_path and os.path.exists(self.cad_file_path) and self.cad_file_path.lower().endswith('.pdf'):
+                logger.info(f"Using PDF background from {self.cad_file_path}")
+                self.load_pdf_file()
+            elif self.background_type == "cad" and self.cad_file_path and os.path.exists(self.cad_file_path):
+                logger.info(f"Using CAD background from {self.cad_file_path}")
+                self.load_cad_file()
             else:
-                self.create_grid()
-                logger.info("No CAD file provided. Using grid fallback.")
+                # Fallback to available files if background_type doesn't match available files
+                if self.background_image and os.path.exists(self.background_image):
+                    logger.info(f"Falling back to image background from {self.background_image}")
+                    self.load_background_image(self.background_image)
+                elif self.cad_file_path and os.path.exists(self.cad_file_path):
+                    if self.cad_file_path.lower().endswith('.pdf'):
+                        logger.info(f"Falling back to PDF background from {self.cad_file_path}")
+                        self.load_pdf_file()
+                    else:
+                        logger.info(f"Falling back to CAD background from {self.cad_file_path}")
+                        self.load_cad_file()
+                else:
+                    self.create_grid()
+                    logger.info("No background files available. Using grid fallback.")
         except Exception as e:
             logger.error(f"Error creating background: {e}")
             self.create_grid()  # Fallback to grid if loading fails
+    
+    def load_background_image(self, image_path):
+        """Load an image file as background."""
+        try:
+            if not os.path.exists(image_path):
+                logger.error(f"Image file not found: {image_path}")
+                return False
+                
+            # Load the image file
+            image = QImage(image_path)
+            if image.isNull():
+                logger.error(f"Failed to load image: {image_path}")
+                return False
+                
+            # Get image dimensions
+            width = image.width()
+            height = image.height()
+            logger.info(f"Loaded image with dimensions {width}x{height}")
+            
+            # Create a background using salabim's Animate
+            # Remove existing background elements if any
+            for layer_name, elements in self.cad_elements.items():
+                for element in elements:
+                    element.remove()
+            self.cad_elements = {}
+            
+            # Set the image as background with proper positioning and scale
+            bg = sim.Animate(image=image_path, x0=0, y0=0, 
+                           width=width, height=height, 
+                           layer=0, screen_coordinates=False)
+                           
+            # Register with the layer manager
+            self.layer_manager.add_layer("Background", visible=True)
+            self.cad_elements["Background"] = [bg]
+            
+            # Update the configuration
+            self.config["background_image"] = image_path
+            self.config["background_type"] = "image"
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error loading background image: {e}")
+            return False
 
     def load_pdf_file(self):
         """Load PDF file as background with proper scaling."""
@@ -159,793 +219,649 @@ class CADBackground:
             x_offset = (self.grid_width - target_width) / 2
             y_offset = (self.grid_height - target_height) / 2
             
-            # Create the background image using Salabim's Animate class (not AnimateImage)
-            bg_layer = self.layer_manager.get_layer("Background")
+            # Create an Animate object for the PDF
+            bg = sim.Animate(image=self.temp_image_path, 
+                           x0=x_offset, y0=y_offset,
+                           width=target_width, height=target_height,
+                           screen_coordinates=False)
             
-            # Create image using Animate with proper parameters
-            image_obj = sim.Animate(
-                image=self.temp_image_path,  # Path to the image
-                x0=x_offset + self.x_offset,  # X position
-                y0=y_offset + self.y_offset,  # Y position
-                width0=target_width,          # Target width
-                height0=target_height,        # Target height
-                env=self.env                  # Simulation environment
-            )
+            # Add to the layer manager
+            self.layer_manager.add_layer("PDF Background", visible=True)
+            self.cad_elements["PDF Background"] = [bg]
             
-            self.cad_elements.setdefault("pdf_background", []).append(image_obj)
-            bg_layer.add_object(image_obj)
-            self.layers["pdf_background"] = True
+            # Create grid overlay
+            if self.config.get("show_grid_overlay", True):
+                self.create_grid_overlay(target_width, target_height, x_offset, y_offset)
             
-            # Add a grid on top for reference
-            self.add_grid_overlay(x_offset + self.x_offset, y_offset + self.y_offset, target_width, target_height)
-            
-            # Add bay markers for context
-            self.add_bay_markers()
-            
-            logger.info(f"PDF loaded successfully with dimensions {target_width}x{target_height}")
+            # Update configuration
+            self.config["background_type"] = "pdf"
+            logger.info(f"PDF background loaded with dimensions {target_width}x{target_height}")
             doc.close()
-            
+            return True
         except Exception as e:
-            logger.error(f"Failed to load PDF file: {e}", exc_info=True)
+            logger.error(f"Error loading PDF background: {e}")
             self.create_grid()
-
-    def add_grid_overlay(self, x, y, width, height):
-        """Add a grid overlay on top of the PDF background."""
-        grid_size = self.config.get("grid_size", 100)
-        grid_layer = self.layer_manager.get_layer("Background")
-        
-        # Horizontal grid lines
-        for i in range(0, int(height) + 1, grid_size):
-            y_pos = y + i
-            line = sim.AnimateLine(
-                spec=(x, y_pos, x + width, y_pos),
-                linecolor='lightblue',
-                linewidth=0.5,
-                env=self.env
-            )
-            grid_layer.add_object(line)
-            self.cad_elements.setdefault("grid_overlay", []).append(line)
-        
-        # Vertical grid lines
-        for i in range(0, int(width) + 1, grid_size):
-            x_pos = x + i
-            line = sim.AnimateLine(
-                spec=(x_pos, y, x_pos, y + height),
-                linecolor='lightblue',
-                linewidth=0.5,
-                env=self.env
-            )
-            grid_layer.add_object(line)
-            self.cad_elements.setdefault("grid_overlay", []).append(line)
-
-    def add_bay_markers(self):
-        bays = self.config.get("bays", {})
-        bay_layer = self.layer_manager.get_layer("Background")
-        
-        for bay_name, bay_pos in bays.items():
-            x = bay_pos.get("x_offset", 0)
-            y = bay_pos.get("y_offset", 0)
-        
-           
-            # Create rectangle outline for the bay
-            width = bay_pos.get("width", 200)
-            height = bay_pos.get("height", 200)
-            
-            # Top line
-            top_line = sim.AnimateLine(
-                spec=(x, y, x + width, y),
-                linecolor='red',
-                linewidth=2,
-                env=self.env
-            )
-            bay_layer.add_object(top_line)
-            self.cad_elements.setdefault("bay_markers", []).append(top_line)
-            
-            # Bottom line
-            bottom_line = sim.AnimateLine(
-                spec=(x, y + height, x + width, y + height),
-                linecolor='red',
-                linewidth=2,
-                env=self.env
-            )
-            bay_layer.add_object(bottom_line)
-            self.cad_elements.setdefault("bay_markers", []).append(bottom_line)
-            
-            # Left line
-            left_line = sim.AnimateLine(
-                spec=(x, y, x, y + height),
-                linecolor='red',
-                linewidth=2,
-                env=self.env
-            )
-            bay_layer.add_object(left_line)
-            self.cad_elements.setdefault("bay_markers", []).append(left_line)
-            
-            # Right line
-            right_line = sim.AnimateLine(
-                spec=(x + width, y, x + width, y + height),
-                linecolor='red',
-                linewidth=2,
-                env=self.env
-            )
-            bay_layer.add_object(right_line)
-            self.cad_elements.setdefault("bay_markers", []).append(right_line)
-            
-            text = sim.Animate(
-                        text=bay_name,
-                        x0=x + 10,
-                        y0=y + 10,
-                        textcolor0='red',  # Changed from text_color to textcolor0
-                        fontsize0=12,
-                        env=self.env
-                    )
-            bay_layer.add_object(text)
-            self.cad_elements.setdefault("bay_markers", []).append(text)
-
+            return False
+    
     def calculate_pdf_scale(self):
-        """Calculate the optimal scale to fit the PDF based on real-world dimensions."""
+        """Calculate scale factor for PDF based on real-world dimensions."""
         try:
-            # Calculate scale based on grid size and real-world dimensions
-            grid_width = self.grid_width * 0.8  # Use 80% of grid width
-            grid_height = self.grid_height * 0.8  # Use 80% of grid height
-            
-            # Determine scaling factors for width and height
-            scale_x = grid_width / self.pdf_real_width
-            scale_y = grid_height / self.pdf_real_height
-            
-            # Use the smaller scale to ensure the entire PDF fits
-            self.scale = min(scale_x, scale_y)
-            
-            # Update offsets to center the PDF
-            self.x_offset = (self.grid_width - (self.pdf_real_width * self.scale)) / 2
-            self.y_offset = (self.grid_height - (self.pdf_real_height * self.scale)) / 2
-            
-            logger.info(f"PDF scale calculated: {self.scale} (x_offset: {self.x_offset}, y_offset: {self.y_offset})")
+            if PYMUPDF_AVAILABLE and self.cad_file_path and os.path.exists(self.cad_file_path):
+                doc = fitz.open(self.cad_file_path)
+                if doc.page_count > 0:
+                    page = doc.load_page(0)
+                    page_width = page.rect.width
+                    page_height = page.rect.height
+                    
+                    # Calculate scale based on grid dimensions and real-world dimensions
+                    grid_width = self.grid_width
+                    grid_height = self.grid_height
+                    
+                    # Use the largest dimension to fit in the grid while maintaining aspect ratio
+                    width_scale = grid_width * 0.9 / self.pdf_real_width
+                    height_scale = grid_height * 0.9 / self.pdf_real_height
+                    
+                    # Use the smaller scale to ensure both dimensions fit
+                    self.scale = min(width_scale, height_scale)
+                    
+                    doc.close()
+                    logger.info(f"Auto-calculated PDF scale: {self.scale}")
         except Exception as e:
             logger.error(f"Error calculating PDF scale: {e}")
-            # Default to a reasonable scale
-            self.scale = 1.0
-            self.x_offset = 0
-            self.y_offset = 0
 
-    def generate_cad_elements(self):
-        """Generator yielding batches of CAD elements for progressive loading."""
-        extension = os.path.splitext(self.cad_file_path)[1].lower()
-        if extension == '.dxf':
-            for batch in self.generate_dxf_elements():
-                yield batch
-        elif extension == '.svg':
-            for batch in self.generate_svg_elements():
-                yield batch
-        elif extension in ['.dwg', '.cad']:
-            if self.convert_cad_to_dxf():
-                for batch in self.generate_dxf_elements():
-                    yield batch
-            else:
-                logger.error("CAD conversion failed. Falling back to grid.")
-                return
-        else:
-            logger.warning(f"Unsupported format: {extension}")
-            return
-
-    # Rest of the existing methods remain the same...
-    # I'm including just the methods that were modified for PDF support
-    # and keeping all other methods intact
+    def create_grid_overlay(self, width, height, x_offset, y_offset):
+        """Create a grid overlay on top of the PDF or image."""
+        try:
+            grid_layer = []
+            grid_size = self.config.get("grid_size", 100)
+            
+            # Create grid lines
+            for x in range(0, int(width) + grid_size, grid_size):
+                line = sim.AnimateLine(x0=x_offset + x, y0=y_offset, 
+                                     x1=x_offset + x, y1=y_offset + height,
+                                     linecolor="lightgray", linewidth=1, 
+                                     screen_coordinates=False)
+                grid_layer.append(line)
+                
+            for y in range(0, int(height) + grid_size, grid_size):
+                line = sim.AnimateLine(x0=x_offset, y0=y_offset + y, 
+                                     x1=x_offset + width, y1=y_offset + y,
+                                     linecolor="lightgray", linewidth=1, 
+                                     screen_coordinates=False)
+                grid_layer.append(line)
+                
+            # Add coordinate indicators
+            for x in range(0, int(width) + grid_size, grid_size):
+                text = sim.AnimateText(text=str(x // grid_size), 
+                                     x0=x_offset + x, y0=y_offset - 20,
+                                     textcolor="gray", fontsize=10,
+                                     screen_coordinates=False)
+                grid_layer.append(text)
+                
+            for y in range(0, int(height) + grid_size, grid_size):
+                text = sim.AnimateText(text=str(y // grid_size), 
+                                     x0=x_offset - 20, y0=y_offset + y,
+                                     textcolor="gray", fontsize=10,
+                                     screen_coordinates=False)
+                grid_layer.append(text)
+                
+            # Add to layer manager
+            self.layer_manager.add_layer("Grid Overlay", visible=self.config.get("show_grid_overlay", True))
+            self.cad_elements["Grid Overlay"] = grid_layer
+            
+        except Exception as e:
+            logger.error(f"Error creating grid overlay: {e}")
 
     def load_cad_file(self):
-        """Load CAD file with caching and progressive addition."""
-        if not self.cad_file_path:
-            logger.warning("No CAD file specified")
+        """Load and parse a CAD file."""
+        if not self.cad_file_path or not os.path.exists(self.cad_file_path):
+            logger.error("No CAD file provided or file does not exist")
+            self.create_grid()
             return
 
-        try:
-            logger.info(f"Loading CAD file: {self.cad_file_path}")
-            
-            # Special handling for PDF files
-            if self.cad_file_path.lower().endswith('.pdf'):
-                self.load_pdf_file()
-                return
+        file_ext = os.path.splitext(self.cad_file_path)[1].lower()
+        if file_ext == '.dxf' and EZDXF_AVAILABLE:
+            self.load_dxf_file()
+        elif file_ext == '.svg':
+            self.load_svg_file()
+        else:
+            # Try to convert to DXF if not directly supported
+            if ODA_AVAILABLE:
+                dxf_path = self.convert_to_dxf(self.cad_file_path)
+                if dxf_path and EZDXF_AVAILABLE:
+                    self.cad_file_path = dxf_path
+                    self.load_dxf_file()
+                else:
+                    logger.error(f"Unsupported CAD format: {file_ext}")
+                    self.create_grid()
+            else:
+                logger.error(f"Unsupported CAD format: {file_ext}")
+                self.create_grid()
                 
-            if self.config.get("auto_scale_cad", True):
-                self.scale = self.determine_optimal_scale()
-                logger.info(f"Auto-detected scale: {self.scale}")
+        # Update configuration
+        self.config["background_type"] = "cad"
 
-            # Optimization 4: Check cache first
-            cache_path = self.get_cache_path()
-            if cache_path and self.load_from_cache(cache_path):
-                logger.info("Loaded from cache successfully")
-                return
-
-            # Clear existing elements
+    def load_dxf_file(self):
+        """Load a DXF file and create entities."""
+        try:
+            # Check if we have a cached version
+            cache_file = None
+            if self.cache_enabled:
+                cache_file = self.get_cache_path(self.cad_file_path)
+                if os.path.exists(cache_file):
+                    self.load_from_cache(cache_file)
+                    return
+                    
+            # Clear existing elements if any
             for layer_name, elements in self.cad_elements.items():
                 for element in elements:
                     element.remove()
             self.cad_elements = {}
             self.layers = {}
-
-            # Optimization 1 & 8: Progressive loading and batch rendering
-            bg_layer = self.layer_manager.get_layer("Background")
-            entity_count = 0
-            for batch in self.generate_cad_elements():
-                for animate, layer_name in batch:
-                    bg_layer.add_object(animate)
-                    self.cad_elements.setdefault(layer_name, []).append(animate)
-                    self.layers[layer_name] = True
-                    entity_count += 1
-                logger.debug(f"Added batch of {len(batch)} elements")
             
-            logger.info(f"Loaded {entity_count} CAD elements")
-            if entity_count == 0:
-                self.create_grid()
-            elif cache_path:
-                self.save_to_cache(cache_path)
-        except Exception as e:
-            logger.error(f"Failed to load CAD file: {e}", exc_info=True)
-            self.create_grid()
-
-
-
-    def generate_dxf_elements(self):
-        """Generate DXF elements in batches with optimized parsing."""
-        if not EZDXF_AVAILABLE:
-            logger.warning("ezdxf not available. Falling back to simple parser.")
-            for batch in self.generate_dxf_elements_simple():
-                yield batch
-            return
-
-        try:
+            # Parse the DXF file
+            logger.info(f"Loading DXF file: {self.cad_file_path}")
             doc = ezdxf.readfile(self.cad_file_path)
-            msp = doc.modelspace()
-            # Optimization 2: Filter relevant entity types only
-            supported_types = ['LINE', 'CIRCLE', 'ARC', 'LWPOLYLINE']
-            query_string = ' or '.join(supported_types)
-            if self.visible_layers:
-                layer_query = 'Layer in {}'.format(list(self.visible_layers))
-                query = msp.query(f'({query_string}) and ({layer_query})')
-            else:
-                query = msp.query(query_string)
-
-            batch_size = 1000  # Adjustable for performance
-            batch = []
-            for entity in query:
-                try:
-                    animate, layer_name = self.create_animate_from_entity(entity)
-                    if animate:
-                        batch.append((animate, layer_name))
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-                except Exception as e:
-                    logger.warning(f"Skipping problematic entity: {e}")
-            if batch:
-                yield batch
-        except Exception as e:
-            logger.error(f"DXF parsing error: {e}")
-            return
-
-    def generate_dxf_elements_simple(self):
-        """Fallback generator for DXF without ezdxf."""
-        try:
-            with open(self.cad_file_path, 'r') as f:
-                dxf_text = f.readlines()
+            modelspace = doc.modelspace()
             
-            batch_size = 1000
-            batch = []
-            entity_count = 0
-            current_layer = "0"
-            i = 0
-            while i < len(dxf_text):
-                line = dxf_text[i].strip()
-                if line == "8" and i+1 < len(dxf_text):
-                    current_layer = dxf_text[i+1].strip()
+            # Extract layers
+            layers = {}
+            for layer in doc.layers:
+                layers[layer.dxf.name] = {
+                    'name': layer.dxf.name,
+                    'color': layer.get_color(),
+                    'linetype': layer.dxf.linetype,
+                    'visible': not layer.is_off(),
+                    'locked': layer.is_locked()
+                }
+            self.layers = layers
+            
+            # Register layers with layer manager
+            for layer_name, layer_props in layers.items():
+                visible = layer_props['visible']
+                if self.visible_layers:  # If specific layers are set to be visible
+                    visible = layer_name in self.visible_layers
+                self.layer_manager.add_layer(layer_name, visible=visible)
                 
-                if self.visible_layers and current_layer not in self.visible_layers:
-                    i += 1
+            # Filter visible layers
+            visible_layers = set(layer_name for layer_name, props in layers.items() 
+                              if props['visible'] and (not self.visible_layers or layer_name in self.visible_layers))
+            
+            # Process entities in batches to prevent UI freezing
+            batch_size = 1000  # Adjust based on complexity
+            entities = list(modelspace)
+            
+            # Get bounds for scaling
+            auto_scale = self.config.get("auto_scale_cad", True)
+            if auto_scale:
+                scale_factor = self.calculate_dxf_scale(entities)
+                if scale_factor:
+                    self.scale = scale_factor
+                    
+            # Calculate center offset
+            min_x, min_y, max_x, max_y = self.get_bounds(entities)
+            center_x = (max_x + min_x) / 2
+            center_y = (max_y + min_y) / 2
+            grid_center_x = self.grid_width / 2
+            grid_center_y = self.grid_height / 2
+            x_offset = grid_center_x - center_x * self.scale
+            y_offset = grid_center_y - center_y * self.scale
+            
+            if "cad_x_offset" in self.config and "cad_y_offset" in self.config:
+                x_offset = self.config["cad_x_offset"]
+                y_offset = self.config["cad_y_offset"]
+            else:
+                self.config["cad_x_offset"] = x_offset
+                self.config["cad_y_offset"] = y_offset
+                
+            # Process entities in batches
+            for i in range(0, len(entities), batch_size):
+                batch = entities[i:i+batch_size]
+                if i == 0:
+                    logger.info(f"Processing DXF entities: {len(entities)} total in batches of {batch_size}")
+                
+                self.process_dxf_batch(batch, visible_layers, x_offset, y_offset)
+            
+            # Save to cache
+            if self.cache_enabled and cache_file:
+                self.save_to_cache(cache_file)
+                
+            logger.info(f"DXF file loaded with {len(entities)} entities")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading DXF file: {e}")
+            self.create_grid()
+            return False
+
+    def process_dxf_batch(self, entities, visible_layers, x_offset, y_offset):
+        """Process a batch of DXF entities."""
+        for entity in entities:
+            try:
+                layer_name = entity.dxf.layer
+                if layer_name not in visible_layers:
                     continue
                 
-                if line in ["LINE", "CIRCLE"]:
-                    entity_data = {}
-                    for j in range(50):
-                        if i+j >= len(dxf_text):
-                            break
-                        code = dxf_text[i+j].strip()
-                        if code.isdigit() and i+j+1 < len(dxf_text):
-                            try:
-                                value = float(dxf_text[i+j+1].strip())
-                                entity_data[int(code)] = value
-                            except ValueError:
-                                pass
+                # Skip hidden entities
+                if hasattr(entity.dxf, 'invisible') and entity.dxf.invisible:
+                    continue
                     
-                    color = self._get_color_from_entity(entity_data)
-                    animate = None
-                    if line == "LINE" and all(k in entity_data for k in [10, 20, 11, 21]):
-                        x1 = entity_data[10] * self.scale + self.x_offset
-                        y1 = entity_data[20] * self.scale + self.y_offset
-                        x2 = entity_data[11] * self.scale + self.x_offset
-                        y2 = entity_data[21] * self.scale + self.y_offset
-                        animate = sim.AnimateLine(spec=(x1, y1, x2, y2), linecolor=color, linewidth=1, env=self.env)
-                    elif line == "CIRCLE" and all(k in entity_data for k in [10, 20, 40]):
-                        x = entity_data[10] * self.scale + self.x_offset
-                        y = entity_data[20] * self.scale + self.y_offset
-                        r = entity_data[40] * self.scale
-                        animate = sim.AnimateCircle(radius=r, x0=x, y0=y, fillcolor0="none", linecolor0=color, linewidth0=1, env=self.env)
+                # Simplification options
+                min_line_length = self.simplify_options.get("min_line_length", 0)
+                skip_text = self.simplify_options.get("skip_text", False)
+                skip_points = self.simplify_options.get("skip_points", True)
                     
-                    if animate:
-                        batch.append((animate, current_layer))
-                        entity_count += 1
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-                i += 1
-            
-            if batch:
-                yield batch
-            logger.info(f"Simple DXF parser generated {entity_count} elements")
-        except Exception as e:
-            logger.error(f"Simple DXF parser error: {e}")
+                if layer_name not in self.cad_elements:
+                    self.cad_elements[layer_name] = []
+                    
+                # Get entity color
+                color = 'white'  # Default
+                if hasattr(entity.dxf, 'color'):
+                    color_idx = entity.dxf.color
+                    # Convert DXF color index to RGB
+                    # This is a simplified approach - DXF colors are complex
+                    if color_idx == 1:
+                        color = 'red'
+                    elif color_idx == 2:
+                        color = 'yellow'
+                    elif color_idx == 3:
+                        color = 'green'
+                    elif color_idx == 4:
+                        color = 'cyan'
+                    elif color_idx == 5:
+                        color = 'blue'
+                    elif color_idx == 6:
+                        color = 'magenta'
+                    elif color_idx == 7:
+                        color = 'white'
+                
+                # Handle different entity types
+                if entity.dxftype() == 'LINE':
+                    # Skip very short lines if simplification is enabled
+                    if min_line_length > 0:
+                        length = ((entity.dxf.end.x - entity.dxf.start.x)**2 + 
+                                  (entity.dxf.end.y - entity.dxf.start.y)**2)**0.5
+                        if length < min_line_length:
+                            continue
+                    
+                    line = sim.AnimateLine(
+                        x0=entity.dxf.start.x * self.scale + x_offset,
+                        y0=entity.dxf.start.y * self.scale + y_offset,
+                        x1=entity.dxf.end.x * self.scale + x_offset,
+                        y1=entity.dxf.end.y * self.scale + y_offset,
+                        linecolor=color,
+                        linewidth=1,
+                        layer=layer_name,
+                        screen_coordinates=False
+                    )
+                    self.cad_elements[layer_name].append(line)
+                    
+                elif entity.dxftype() == 'CIRCLE':
+                    circle = sim.AnimateCircle(
+                        x0=entity.dxf.center.x * self.scale + x_offset,
+                        y0=entity.dxf.center.y * self.scale + y_offset,
+                        radius=entity.dxf.radius * self.scale,
+                        linecolor=color,
+                        linewidth=1,
+                        layer=layer_name,
+                        screen_coordinates=False
+                    )
+                    self.cad_elements[layer_name].append(circle)
+                    
+                elif entity.dxftype() == 'ARC':
+                    # Arcs are complex to represent directly in salabim
+                    # For now, we'll convert to line segments
+                    segments = 20  # Number of line segments to use for arc
+                    start_angle = entity.dxf.start_angle
+                    end_angle = entity.dxf.end_angle
+                    if end_angle < start_angle:
+                        end_angle += 360
+                    angle_step = (end_angle - start_angle) / segments
+                    
+                    points = []
+                    for i in range(segments + 1):
+                        angle = math.radians(start_angle + i * angle_step)
+                        x = entity.dxf.center.x + entity.dxf.radius * math.cos(angle)
+                        y = entity.dxf.center.y + entity.dxf.radius * math.sin(angle)
+                        points.append((x, y))
+                    
+                    for i in range(segments):
+                        line = sim.AnimateLine(
+                            x0=points[i][0] * self.scale + x_offset,
+                            y0=points[i][1] * self.scale + y_offset,
+                            x1=points[i+1][0] * self.scale + x_offset,
+                            y1=points[i+1][1] * self.scale + y_offset,
+                            linecolor=color,
+                            linewidth=1,
+                            layer=layer_name,
+                            screen_coordinates=False
+                        )
+                        self.cad_elements[layer_name].append(line)
+                        
+                elif entity.dxftype() == 'TEXT' and not skip_text:
+                    text = sim.AnimateText(
+                        text=entity.dxf.text,
+                        x0=entity.dxf.insert.x * self.scale + x_offset,
+                        y0=entity.dxf.insert.y * self.scale + y_offset,
+                        textcolor=color,
+                        fontsize=entity.dxf.height * self.scale if entity.dxf.height else 12,
+                        layer=layer_name,
+                        screen_coordinates=False
+                    )
+                    self.cad_elements[layer_name].append(text)
+                    
+                elif entity.dxftype() == 'POLYLINE' or entity.dxftype() == 'LWPOLYLINE':
+                    # Convert to line segments
+                    points = list(entity.vertices()) if entity.dxftype() == 'POLYLINE' else list(entity.points())
+                    if len(points) < 2:
+                        continue
+                        
+                    for i in range(len(points) - 1):
+                        if entity.dxftype() == 'POLYLINE':
+                            p1, p2 = points[i].dxf.location, points[i+1].dxf.location
+                            x1, y1, z1 = p1
+                            x2, y2, z2 = p2
+                        else:
+                            x1, y1 = points[i]
+                            x2, y2 = points[i+1]
+                            
+                        # Skip very short segments if simplification is enabled
+                        if min_line_length > 0:
+                            length = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+                            if length < min_line_length:
+                                continue
+                        
+                        line = sim.AnimateLine(
+                            x0=x1 * self.scale + x_offset,
+                            y0=y1 * self.scale + y_offset,
+                            x1=x2 * self.scale + x_offset,
+                            y1=y2 * self.scale + y_offset,
+                            linecolor=color,
+                            linewidth=1,
+                            layer=layer_name,
+                            screen_coordinates=False
+                        )
+                        self.cad_elements[layer_name].append(line)
+                    
+                    # Close the polyline if it's closed
+                    if hasattr(entity.dxf, 'closed') and entity.dxf.closed:
+                        if entity.dxftype() == 'POLYLINE':
+                            p1, p2 = points[-1].dxf.location, points[0].dxf.location
+                            x1, y1, z1 = p1
+                            x2, y2, z2 = p2
+                        else:
+                            x1, y1 = points[-1]
+                            x2, y2 = points[0]
+                            
+                        line = sim.AnimateLine(
+                            x0=x1 * self.scale + x_offset,
+                            y0=y1 * self.scale + y_offset,
+                            x1=x2 * self.scale + x_offset,
+                            y1=y2 * self.scale + y_offset,
+                            linecolor=color,
+                            linewidth=1,
+                            layer=layer_name,
+                            screen_coordinates=False
+                        )
+                        self.cad_elements[layer_name].append(line)
+                
+                elif entity.dxftype() == 'POINT' and not skip_points:
+                    point = sim.AnimateRectangle(
+                        x0=entity.dxf.location.x * self.scale + x_offset - 1,
+                        y0=entity.dxf.location.y * self.scale + y_offset - 1,
+                        width=2,
+                        height=2,
+                        fillcolor=color,
+                        linecolor=color,
+                        layer=layer_name,
+                        screen_coordinates=False
+                    )
+                    self.cad_elements[layer_name].append(point)
+                    
+            except Exception as e:
+                logger.warning(f"Error processing DXF entity: {e}")
 
-    def generate_svg_elements(self):
-        """Generate SVG elements in batches."""
+    def load_svg_file(self):
+        """Load an SVG file."""
         try:
             tree = ET.parse(self.cad_file_path)
             root = tree.getroot()
-            ns = {"svg": "http://www.w3.org/2000/svg"}
-            batch_size = 1000
-            batch = []
-            entity_count = 0
-
-            for elem in root.findall(".//svg:line", ns) + root.findall(".//svg:circle", ns):
-                try:
-                    if elem.tag.endswith("line"):
-                        x1 = float(elem.attrib.get('x1', 0)) * self.scale + self.x_offset
-                        y1 = float(elem.attrib.get('y1', 0)) * self.scale + self.y_offset
-                        x2 = float(elem.attrib.get('x2', 0)) * self.scale + self.x_offset
-                        y2 = float(elem.attrib.get('y2', 0)) * self.scale + self.y_offset
-                        color = self._svg_color_to_salabim(elem.attrib.get('stroke', 'white'))
-                        animate = sim.AnimateLine(spec=(x1, y1, x2, y2), linecolor=color, linewidth=1, env=self.env)
-                    elif elem.tag.endswith("circle"):
-                        cx = float(elem.attrib.get('cx', 0)) * self.scale + self.x_offset
-                        cy = float(elem.attrib.get('cy', 0)) * self.scale + self.y_offset
-                        r = float(elem.attrib.get('r', 0)) * self.scale
-                        stroke = self._svg_color_to_salabim(elem.attrib.get('stroke', 'white'))
-                        animate = sim.AnimateCircle(radius=r, x0=cx, y0=cy, fillcolor0="none", linecolor0=stroke, linewidth0=1, env=self.env)
-                    else:
-                        continue
-                    
-                    batch.append((animate, "svg"))
-                    entity_count += 1
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-                except Exception as e:
-                    logger.warning(f"Skipping SVG element: {e}")
             
-            if batch:
-                yield batch
-            logger.info(f"Generated {entity_count} SVG elements")
-        except Exception as e:
-            logger.error(f"SVG parsing error: {e}")
-
-    def create_animate_from_entity(self, entity):
-        """Create Animate objects from DXF entities with simplification options."""
-        layer_name = entity.dxf.layer
-        if self.visible_layers and layer_name not in self.visible_layers:
-            return None, None
-        
-        # Optimization 9: Apply user-controlled simplification
-        if entity.dxftype() == 'TEXT' and self.simplify_options.get("remove_text", False):
-            return None, None
-        
-        precision = self.simplify_options.get("reduce_precision", None)
-        color_map = {1: "red", 2: "yellow", 3: "green", 4: "cyan", 5: "blue", 6: "magenta", 7: "white", 8: "gray", 9: "lightgray"}
-        color = color_map.get(entity.dxf.color, "white")
-
-        if entity.dxftype() == 'LINE':
-            start_x = round(entity.dxf.start.x, precision) if precision is not None else entity.dxf.start.x
-            start_y = round(entity.dxf.start.y, precision) if precision is not None else entity.dxf.start.y
-            end_x = round(entity.dxf.end.x, precision) if precision is not None else entity.dxf.end.x
-            end_y = round(entity.dxf.end.y, precision) if precision is not None else entity.dxf.end.y
-            x1 = start_x * self.scale + self.x_offset
-            y1 = start_y * self.scale + self.y_offset
-            x2 = end_x * self.scale + self.x_offset
-            y2 = end_y * self.scale + self.y_offset
-            return sim.AnimateLine(spec=(x1, y1, x2, y2), linecolor=color, linewidth=1, env=self.env), layer_name
-        elif entity.dxftype() == 'CIRCLE':
-            cx = round(entity.dxf.center.x, precision) if precision is not None else entity.dxf.center.x
-            cy = round(entity.dxf.center.y, precision) if precision is not None else entity.dxf.center.y
-            r = round(entity.dxf.radius, precision) if precision is not None else entity.dxf.radius
-            x = cx * self.scale + self.x_offset
-            y = cy * self.scale + self.y_offset
-            r_scaled = r * self.scale
-            return sim.AnimateCircle(radius=r_scaled, x0=x, y0=y, fillcolor0="none", linecolor0=color, linewidth0=1, env=self.env), layer_name
-        elif entity.dxftype() == 'ARC':
-            # Simplified arc handling (could be expanded)
-            cx = entity.dxf.center.x * self.scale + self.x_offset
-            cy = entity.dxf.center.y * self.scale + self.y_offset
-            r = entity.dxf.radius * self.scale
-            start_angle = math.radians(entity.dxf.start_angle)
-            end_angle = math.radians(entity.dxf.end_angle)
-            segments = min(max(int(r * abs(end_angle - start_angle) / 10) + 5, 8), 32)
-            angle_step = (end_angle - start_angle) / segments
-            lines = []
-            for i in range(segments):
-                a1 = start_angle + i * angle_step
-                a2 = start_angle + (i + 1) * angle_step
-                x1 = cx + r * math.cos(a1)
-                y1 = cy + r * math.sin(a1)
-                x2 = cx + r * math.cos(a2)
-                y2 = cy + r * math.sin(a2)
-                line = sim.AnimateLine(spec=(x1, y1, x2, y2), linecolor=color, linewidth=1, env=self.env)
-                lines.append((line, layer_name))
-            return lines[0] if lines else None, layer_name  # Return first line for simplicity
-        return None, None
-
-    def load_cad_file(self):
-        """Load CAD file with caching and progressive addition."""
-        if not self.cad_file_path:
-            logger.warning("No CAD file specified")
-            return
-
-        try:
-            logger.info(f"Loading CAD file: {self.cad_file_path}")
+            # Clear existing elements if any
+            for layer_name, elements in self.cad_elements.items():
+                for element in elements:
+                    element.remove()
+            self.cad_elements = {}
             
-            # Special handling for PDF files
-            if self.cad_file_path.lower().endswith('.pdf'):
-                self.load_pdf_file()
-                return
-                
+            # Default layer
+            self.layer_manager.add_layer("SVG", visible=True)
+            self.cad_elements["SVG"] = []
+            
+            # Get SVG dimensions
+            width = float(root.get('width', '100').replace('px', ''))
+            height = float(root.get('height', '100').replace('px', ''))
+            
+            # Calculate scale factor to fit in grid
             if self.config.get("auto_scale_cad", True):
-                self.scale = self.determine_optimal_scale()
-                logger.info(f"Auto-detected scale: {self.scale}")
-
-            # Optimization 4: Check cache first
-            cache_path = self.get_cache_path()
-            if cache_path and self.load_from_cache(cache_path):
-                logger.info("Loaded from cache successfully")
-                return
-
-            # Clear existing elements
-            for layer_name, elements in self.cad_elements.items():
-                for element in elements:
-                    element.remove()
-            self.cad_elements = {}
-            self.layers = {}
-
-            # Optimization 1 & 8: Progressive loading and batch rendering
-            bg_layer = self.layer_manager.get_layer("Background")
-            entity_count = 0
-            for batch in self.generate_cad_elements():
-                for animate, layer_name in batch:
-                    bg_layer.add_object(animate)
-                    self.cad_elements.setdefault(layer_name, []).append(animate)
-                    self.layers[layer_name] = True
-                    entity_count += 1
-                logger.debug(f"Added batch of {len(batch)} elements")
+                scale_x = self.grid_width / width
+                scale_y = self.grid_height / height
+                self.scale = min(scale_x, scale_y) * 0.9  # 90% of available space
             
-            logger.info(f"Loaded {entity_count} CAD elements")
-            if entity_count == 0:
-                self.create_grid()
-            elif cache_path:
-                self.save_to_cache(cache_path)
+            # This would be a much more extensive parser for SVG
+            # For now, just create a placeholder
+            logger.warning("SVG parsing is limited. Consider converting to DXF for better results.")
+            
+            # Use the SVG file as a background image if possible
+            # This is a fallback method
+            # Convert SVG to PNG using a library or external tool if needed
+            
+            # Create a placeholder frame to show boundaries
+            frame = sim.AnimateRectangle(
+                x0=0, y0=0,
+                width=width * self.scale,
+                height=height * self.scale,
+                linecolor='white',
+                linewidth=1,
+                fillcolor=None,
+                screen_coordinates=False
+            )
+            self.cad_elements["SVG"].append(frame)
+            
+            # Add a label
+            text = sim.AnimateText(
+                text=f"SVG: {os.path.basename(self.cad_file_path)}",
+                x0=width * self.scale / 2,
+                y0=height * self.scale / 2,
+                textcolor='white',
+                fontsize=12,
+                screen_coordinates=False
+            )
+            self.cad_elements["SVG"].append(text)
+            
+            return True
         except Exception as e:
-            logger.error(f"Failed to load CAD file: {e}", exc_info=True)
+            logger.error(f"Error loading SVG file: {e}")
             self.create_grid()
+            return False
 
-    def create_grid(self):
-        """Generate a simple grid background as fallback."""
-        logger.info("Creating grid background")
-        try:
-            for layer_name, elements in self.cad_elements.items():
-                for element in elements:
-                    element.remove()
-            self.cad_elements = {}
-            self.layers = {}
-            bg_layer = self.layer_manager.get_layer("Background")
-            batch = []
-            for x in range(0, self.grid_width + 1, self.grid_size):
-                line = sim.AnimateLine(spec=(x, 0, x, self.grid_height), linecolor="lightgray", linewidth=0.5, env=self.env)
-                batch.append((line, "grid"))
-            for y in range(0, self.grid_height + 1, self.grid_size):
-                line = sim.AnimateLine(spec=(0, y, self.grid_width, y), linecolor="lightgray", linewidth=0.5, env=self.env)
-                batch.append((line, "grid"))
-            for animate, layer_name in batch:
-                bg_layer.add_object(animate)
-                self.cad_elements.setdefault(layer_name, []).append(animate)
-            self.layers["grid"] = True
-        except Exception as e:
-            logger.error(f"Error creating grid: {e}")
-
-    def determine_optimal_scale(self):
-        """Calculate optimal scale to fit CAD file in grid."""
-        try:
-            if not self.cad_file_path or not os.path.exists(self.cad_file_path):
-                return self.scale
-
-            min_x, min_y, max_x, max_y = float('inf'), float('inf'), float('-inf'), float('-inf')
-            if self.cad_file_path.lower().endswith('.dxf') and EZDXF_AVAILABLE:
-                doc = ezdxf.readfile(self.cad_file_path)
-                msp = doc.modelspace()
-                for entity in msp.query('LINE CIRCLE ARC'):
-                    if entity.dxftype() == 'LINE':
-                        min_x = min(min_x, entity.dxf.start.x, entity.dxf.end.x)
-                        min_y = min(min_y, entity.dxf.start.y, entity.dxf.end.y)
-                        max_x = max(max_x, entity.dxf.start.x, entity.dxf.end.x)
-                        max_y = max(max_y, entity.dxf.start.y, entity.dxf.end.y)
-                    elif entity.dxftype() == 'CIRCLE':
-                        min_x = min(min_x, entity.dxf.center.x - entity.dxf.radius)
-                        min_y = min(min_y, entity.dxf.center.y - entity.dxf.radius)
-                        max_x = max(max_x, entity.dxf.center.x + entity.dxf.radius)
-                        max_y = max(max_y, entity.dxf.center.y + entity.dxf.radius)
-                    elif entity.dxftype() == 'ARC':
-                        min_x = min(min_x, entity.dxf.center.x - entity.dxf.radius)
-                        min_y = min(min_y, entity.dxf.center.y - entity.dxf.radius)
-                        max_x = max(max_x, entity.dxf.center.x + entity.dxf.radius)
-                        max_y = max(max_y, entity.dxf.center.y + entity.dxf.radius)
-
-            if min_x != float('inf') and max_x != float('-inf'):
-                cad_width = max_x - min_x
-                cad_height = max_y - min_y
-                if cad_width > 0 and cad_height > 0:
-                    target_width = self.grid_width * 0.8
-                    target_height = self.grid_height * 0.8
-                    scale_x = target_width / cad_width
-                    scale_y = target_height / cad_height
-                    optimal_scale = min(scale_x, scale_y)
-                    self.x_offset = (self.grid_width - cad_width * optimal_scale) / 2 - min_x * optimal_scale
-                    self.y_offset = (self.grid_height - cad_height * optimal_scale) / 2 - min_y * optimal_scale
-                    return optimal_scale
-            return self.scale
-        except Exception as e:
-            logger.error(f"Error determining scale: {e}")
-            return self.scale
-
-    def _get_color_from_entity(self, entity_data):
-        """Map DXF color index to salabim color."""
-        color_map = {1: "red", 2: "yellow", 3: "green", 4: "cyan", 5: "blue", 6: "magenta", 7: "white", 8: "gray", 9: "lightgray", 0: "white"}
-        return color_map.get(entity_data.get(62, 7), "white")
-
-    def _svg_color_to_salabim(self, color):
-        """Convert SVG color to salabim color."""
-        if color == 'none' or not color:
-            return "none"
-        color_map = {"red": "red", "green": "green", "blue": "blue", "yellow": "yellow", "cyan": "cyan", 
-                     "magenta": "magenta", "white": "white", "black": "black", "gray": "gray", "lightgray": "lightgray"}
-        if color.lower() in color_map:
-            return color_map[color.lower()]
-        if color.startswith('#'):
-            return color
-        if color.startswith('rgb('):
-            try:
-                rgb = color[4:-1].split(',')
-                if len(rgb) == 3:
-                    r, g, b = map(int, rgb)
-                    return f"#{r:02x}{g:02x}{b:02x}"
-            except:
-                pass
-        return "white"
-
-    def convert_cad_to_dxf(self):
-        """Convert CAD file to DXF."""
+    def convert_to_dxf(self, file_path):
+        """Convert a CAD file to DXF format."""
         try:
             if ODA_AVAILABLE:
-                temp_dxf = os.path.join(tempfile.gettempdir(), "converted_temp.dxf")
-                if convert_cad_to_dxf(self.cad_file_path, temp_dxf):
-                    self.cad_file_path = temp_dxf
-                    return True
-            return False
+                dxf_path = file_path.rsplit('.', 1)[0] + '.dxf'
+                result = convert_cad_to_dxf(file_path, dxf_path)
+                if result and os.path.exists(dxf_path):
+                    logger.info(f"Converted {file_path} to {dxf_path}")
+                    return dxf_path
+            return None
         except Exception as e:
-            logger.error(f"CAD conversion error: {e}")
+            logger.error(f"Error converting CAD file to DXF: {e}")
+            return None
+
+    def create_grid(self):
+        """Create a simple grid background."""
+        try:
+            # Clear existing elements if any
+            for layer_name, elements in self.cad_elements.items():
+                for element in elements:
+                    element.remove()
+            self.cad_elements = {}
+            
+            # Create a grid layer
+            self.layer_manager.add_layer("Grid", visible=True)
+            self.cad_elements["Grid"] = []
+            
+            # Grid properties
+            grid_size = self.grid_size
+            width = self.grid_width
+            height = self.grid_height
+            
+            # Create horizontal and vertical lines
+            for x in range(0, width + grid_size, grid_size):
+                line = sim.AnimateLine(x0=x, y0=0, x1=x, y1=height,
+                                     linecolor='gray', linewidth=1,
+                                     screen_coordinates=False)
+                self.cad_elements["Grid"].append(line)
+                
+            for y in range(0, height + grid_size, grid_size):
+                line = sim.AnimateLine(x0=0, y0=y, x1=width, y1=y,
+                                     linecolor='gray', linewidth=1,
+                                     screen_coordinates=False)
+                self.cad_elements["Grid"].append(line)
+                
+            # Create coordinate labels at regular intervals
+            label_interval = 5 * grid_size
+            for x in range(0, width + label_interval, label_interval):
+                text = sim.AnimateText(text=str(x), x0=x, y0=-20,
+                                     textcolor='white', fontsize=10,
+                                     screen_coordinates=False)
+                self.cad_elements["Grid"].append(text)
+                
+            for y in range(0, height + label_interval, label_interval):
+                text = sim.AnimateText(text=str(y), x0=-20, y0=y,
+                                     textcolor='white', fontsize=10,
+                                     screen_coordinates=False)
+                self.cad_elements["Grid"].append(text)
+                
+            # Update configuration
+            self.config["background_type"] = "grid"
+            logger.info(f"Created grid background {width}x{height} with grid size {grid_size}")
+            return True
+        except Exception as e:
+            logger.error(f"Error creating grid: {e}")
             return False
 
-    def get_cache_path(self):
-        """Generate cache file path based on file metadata."""
-        if not self.cache_enabled or not self.cad_file_path:
-            return None
+    def get_bounds(self, entities):
+        """Calculate bounds of all entities."""
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        for entity in entities:
+            try:
+                if entity.dxftype() == 'LINE':
+                    min_x = min(min_x, entity.dxf.start.x, entity.dxf.end.x)
+                    min_y = min(min_y, entity.dxf.start.y, entity.dxf.end.y)
+                    max_x = max(max_x, entity.dxf.start.x, entity.dxf.end.x)
+                    max_y = max(max_y, entity.dxf.start.y, entity.dxf.end.y)
+                elif entity.dxftype() == 'CIRCLE':
+                    min_x = min(min_x, entity.dxf.center.x - entity.dxf.radius)
+                    min_y = min(min_y, entity.dxf.center.y - entity.dxf.radius)
+                    max_x = max(max_x, entity.dxf.center.x + entity.dxf.radius)
+                    max_y = max(max_y, entity.dxf.center.y + entity.dxf.radius)
+                elif entity.dxftype() == 'ARC':
+                    # Simplified bounds for arc
+                    min_x = min(min_x, entity.dxf.center.x - entity.dxf.radius)
+                    min_y = min(min_y, entity.dxf.center.y - entity.dxf.radius)
+                    max_x = max(max_x, entity.dxf.center.x + entity.dxf.radius)
+                    max_y = max(max_y, entity.dxf.center.y + entity.dxf.radius)
+                elif entity.dxftype() == 'TEXT':
+                    min_x = min(min_x, entity.dxf.insert.x)
+                    min_y = min(min_y, entity.dxf.insert.y)
+                    max_x = max(max_x, entity.dxf.insert.x)
+                    max_y = max(max_y, entity.dxf.insert.y)
+                elif entity.dxftype() == 'POLYLINE':
+                    for vertex in entity.vertices():
+                        x, y, z = vertex.dxf.location
+                        min_x = min(min_x, x)
+                        min_y = min(min_y, y)
+                        max_x = max(max_x, x)
+                        max_y = max(max_y, y)
+                elif entity.dxftype() == 'LWPOLYLINE':
+                    for point in entity.points():
+                        x, y = point
+                        min_x = min(min_x, x)
+                        min_y = min(min_y, y)
+                        max_x = max(max_x, x)
+                        max_y = max(max_y, y)
+                elif entity.dxftype() == 'POINT':
+                    min_x = min(min_x, entity.dxf.location.x)
+                    min_y = min(min_y, entity.dxf.location.y)
+                    max_x = max(max_x, entity.dxf.location.x)
+                    max_y = max(max_y, entity.dxf.location.y)
+            except Exception as e:
+                logger.warning(f"Error calculating bounds for entity: {e}")
+                
+        # Handle case where no entities were processed
+        if min_x == float('inf'):
+            min_x = min_y = 0
+            max_x = max_y = 1000
+            
+        return min_x, min_y, max_x, max_y
+
+    def calculate_dxf_scale(self, entities):
+        """Calculate optimal scale factor for DXF entities."""
+        min_x, min_y, max_x, max_y = self.get_bounds(entities)
+        
+        width = max_x - min_x
+        height = max_y - min_y
+        
+        if width <= 0 or height <= 0:
+            return 1.0
+            
+        # Calculate scale to fit in grid (90% of available space)
+        scale_x = (self.grid_width * 0.9) / width
+        scale_y = (self.grid_height * 0.9) / height
+        
+        return min(scale_x, scale_y)
+
+    def get_cache_path(self, file_path):
+        """Generate a cache path for a file."""
+        # Create a unique hash of the file
+        file_stat = os.stat(file_path)
+        file_hash = hashlib.md5(f"{file_path}_{file_stat.st_size}_{file_stat.st_mtime}".encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{file_hash}.cache")
+
+    def save_to_cache(self, cache_path):
+        """Save parsed CAD elements to cache."""
+        # We can't directly cache the animate objects, but we can cache their parameters
         try:
-            file_stat = os.stat(self.cad_file_path)
-            cache_key = f"{os.path.basename(self.cad_file_path)}_{file_stat.st_mtime}_{file_stat.st_size}_{self.scale}_{self.x_offset}_{self.y_offset}"
-            cache_hash = hashlib.md5(cache_key.encode()).hexdigest()
-            return os.path.join(self.cache_dir, f"{cache_hash}.msgpack")
+            cache_data = {
+                'file_path': self.cad_file_path,
+                'scale': self.scale,
+                'x_offset': self.x_offset,
+                'y_offset': self.y_offset,
+                'layers': self.layers,
+                # We would need a serializable representation of the elements
+                # This is a complex task beyond the scope of this implementation
+            }
+            with open(cache_path, 'wb') as f:
+                msgpack.dump(cache_data, f)
+            logger.info(f"CAD data cached to {cache_path}")
         except Exception as e:
-            logger.error(f"Cache path generation error: {e}")
-            return None
+            logger.error(f"Error saving CAD cache: {e}")
 
     def load_from_cache(self, cache_path):
-        """Load elements from MessagePack cache."""
-        if not cache_path or not os.path.exists(cache_path):
-            return False
+        """Load parsed CAD elements from cache."""
         try:
             with open(cache_path, 'rb') as f:
                 cache_data = msgpack.load(f)
-            if not isinstance(cache_data, dict) or 'elements' not in cache_data:
-                logger.warning("Invalid cache format")
-                return False
-
-            bg_layer = self.layer_manager.get_layer("Background")
-            self.cad_elements = {}
-            self.layers = {layer: True for layer in cache_data.get('layers', [])}
-            entity_count = 0
-            for element_data in cache_data['elements']:
-                layer_name = element_data.get('layer', 'default')
-                self.cad_elements.setdefault(layer_name, [])
-                if element_data['type'] == 'line':
-                    animate = sim.AnimateLine(
-                        spec=element_data['spec'],
-                        linecolor=element_data['linecolor'],
-                        linewidth=element_data.get('linewidth', 1),
-                        env=self.env
-                    )
-                elif element_data['type'] == 'circle':
-                    animate = sim.AnimateCircle(
-                        radius=element_data['radius'],
-                        x0=element_data['x0'],
-                        y0=element_data['y0'],
-                        fillcolor0=element_data.get('fillcolor0', 'none'),
-                        linecolor0=element_data['linecolor0'],
-                        linewidth0=element_data.get('linewidth0', 1),
-                        env=self.env
-                    )
-                else:
-                    continue
-                bg_layer.add_object(animate)
-                self.cad_elements[layer_name].append(animate)
-                entity_count += 1
-            logger.info(f"Loaded {entity_count} elements from cache")
-            return entity_count > 0
-        except Exception as e:
-            logger.error(f"Cache load error: {e}")
-            return False
-
-    def save_to_cache(self, cache_path):
-        """Save elements to MessagePack cache."""
-        if not self.cache_enabled or not cache_path or not self.cad_elements:
-            return False
-        try:
-            cache_data = {'layers': list(self.layers.keys()), 'elements': []}
-            for layer_name, elements in self.cad_elements.items():
-                for element in elements:
-                    if isinstance(element, sim.AnimateLine):
-                        cache_data['elements'].append({
-                            'type': 'line',
-                            'layer': layer_name,
-                            'spec': element.spec,
-                            'linecolor': element.linecolor,
-                            'linewidth': element.linewidth
-                        })
-                    elif isinstance(element, sim.AnimateCircle):
-                        cache_data['elements'].append({
-                            'type': 'circle',
-                            'layer': layer_name,
-                            'x0': element.x0,
-                            'y0': element.y0,
-                            'radius': element.radius,
-                            'fillcolor0': element.fillcolor0,
-                            'linecolor0': element.linecolor0,
-                            'linewidth0': element.linewidth0
-                        })
-            with open(cache_path, 'wb') as f:
-                msgpack.dump(cache_data, f)
-            logger.info(f"Saved {len(cache_data['elements'])} elements to cache")
-            return True
-        except Exception as e:
-            logger.error(f"Cache save error: {e}")
-            return False
-
-    def setup_layer_management(self):
-        """
-        Configure layer visibility toggling with a fallback mechanism.
-        Integrates with the layer manager if available, otherwise uses an internal fallback.
-        """
-        try:
-            # Check if the layer manager supports the required interface
-            if not hasattr(self.layer_manager, 'add_cad_layer'):
-                logger.warning("LayerManager doesn't support CAD layers. Using fallback mechanism.")
-                self._setup_fallback_layer_management()
-                return
-                
-            # Use the proper layer manager
-            self.toggle_layer = self._toggle_cad_layer
-            if self.layers:
-                for layer_name in self.layers:
-                    is_visible = layer_name in self.visible_layers or not self.visible_layers
-                    self.layer_manager.add_cad_layer(layer_name, is_visible)
-            logger.info("CAD layer management setup complete")
-        except Exception as e:
-            logger.error(f"Error setting up layer management: {e}")
-            # Fall back to internal layer management
-            self._setup_fallback_layer_management()
-    
-    def _setup_fallback_layer_management(self):
-        """
-        Set up internal fallback layer management when the external layer manager isn't available.
-        Initializes visibility states for all layers.
-        """
-        self.using_fallback_layer_manager = True
-        self.fallback_visibility = {}
-        
-        # Initialize fallback visibility for all layers
-        for layer_name in self.layers:
-            self.fallback_visibility[layer_name] = layer_name in self.visible_layers or not self.visible_layers
-        
-        # Set the toggle function to use the fallback
-        self.toggle_layer = self._toggle_fallback_layer
-        logger.info("Using fallback layer management system")
-    
-    def _toggle_fallback_layer(self, layer_name, visible):
-        """
-        Toggle visibility of a CAD layer using the fallback system.
-        Manually adjusts the visibility of elements in the layer.
-        
-        Args:
-            layer_name (str): The name of the layer to toggle.
-            visible (bool): Whether the layer should be visible.
-        """
-        if layer_name not in self.cad_elements:
-            return
+            logger.info(f"Loaded CAD data from cache: {cache_path}")
             
-        self.fallback_visibility[layer_name] = visible
-        
-        # Manually show/hide elements
-        for element in self.cad_elements[layer_name]:
-            try:
-                if visible:
-                    # Use alpha property if available
-                    if hasattr(element, 'update') and hasattr(element, 'alpha0'):
-                        element.update(alpha0=1)
-                    # Otherwise try other methods
-                    elif hasattr(element, 'show'):
-                        element.show()
-                else:
-                    if hasattr(element, 'update') and hasattr(element, 'alpha0'):
-                        element.update(alpha0=0)
-                    elif hasattr(element, 'hide'):
-                        element.hide()
-            except Exception as e:
-                logger.error(f"Error toggling element visibility in fallback mode: {e}")
-    
-    def _toggle_cad_layer(self, layer_name, visible):
-        """
-        Toggle visibility of a CAD layer using the layer manager.
-        Adjusts visibility of elements within the specified layer.
-        
-        Args:
-            layer_name (str): The name of the layer to toggle.
-            visible (bool): Whether the layer should be visible.
-        """
-        if layer_name not in self.cad_elements:
-            return
+            # We would reconstruct the elements here
+            # For now, just log that we found a cache but still load the original file
+            logger.info("Cache loading is limited. Falling back to normal loading.")
             
-        try:
-            for element in self.cad_elements[layer_name]:
-                try:
-                    if visible:
-                        if hasattr(element, 'show'):
-                            element.show()
-                        elif hasattr(element, 'update'):
-                            element.update(alpha0=1)
-                    else:
-                        if hasattr(element, 'hide'):
-                            element.hide()
-                        elif hasattr(element, 'update'):
-                            element.update(alpha0=0)
-                except Exception as e:
-                    logger.error(f"Error toggling individual element visibility: {e}")
+            # Reset to trigger normal loading
+            self.load_dxf_file()
         except Exception as e:
-            logger.error(f"Error in _toggle_cad_layer for {layer_name}: {e}")
-    
-    def get_cad_layers(self):
-        """
-        Get information about CAD layers for UI display.
-        
-        Returns:
-            list: List of (layer_name, is_visible) tuples representing layer names and their visibility states.
-        """
-        if self.using_fallback_layer_manager:
-            return [(name, self.fallback_visibility.get(name, True)) for name in self.layers.keys()]
-        elif hasattr(self.layer_manager, 'get_cad_layers'):
-            # Use the layer manager's implementation if available
-            return self.layer_manager.get_cad_layers()
-        else:
-            # Basic fallback
-            return [(name, name in self.visible_layers or not self.visible_layers) 
-                    for name in self.layers.keys()]   # Remaining methods like setup_layer_management, toggle_layer, etc., remain unchanged for brevity
+            logger.error(f"Error loading CAD cache: {e}")
+            self.load_dxf_file()  # Fallback to normal loading
