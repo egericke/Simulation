@@ -8,7 +8,9 @@ from PyQt5.QtWidgets import (QApplication, QWizard, QWizardPage, QLabel, QVBoxLa
                              QComboBox, QCheckBox, QSpinBox, QGroupBox, QGridLayout, QInputDialog)
 from PyQt5.QtCore import Qt, QRectF
 from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap
+import logging
 
+logger = logging.getLogger(__name__)
 
 def is_valid_bay(bay_pos):
     """Check if a bay position dictionary is valid.
@@ -19,8 +21,57 @@ def is_valid_bay(bay_pos):
     Returns:
         bool: True if the bay has all required keys ("x", "y", "width", "height"), False otherwise.
     """
+    if not isinstance(bay_pos, dict):
+        logger.error(f"Bay position is not a dictionary: {type(bay_pos)}")
+        return False
+        
     required_keys = {"x", "y", "width", "height"}
-    return isinstance(bay_pos, dict) and required_keys.issubset(bay_pos.keys())
+    has_required_keys = required_keys.issubset(bay_pos.keys())
+    
+    if not has_required_keys:
+        missing_keys = required_keys - set(bay_pos.keys())
+        logger.error(f"Bay position missing required keys: {missing_keys}")
+        return False
+        
+    # Check that values are numeric and positive
+    for key in required_keys:
+        try:
+            value = float(bay_pos[key])
+            if key in ('width', 'height') and value <= 0:
+                logger.error(f"Bay {key} must be positive, got {value}")
+                return False
+        except (ValueError, TypeError):
+            logger.error(f"Bay {key} has non-numeric value: {bay_pos[key]}")
+            return False
+            
+    return True
+
+def is_position_in_bay(position, bay):
+    """Check if a position is within a bay's boundaries.
+    
+    Args:
+        position (dict): Position with 'x' and 'y' keys.
+        bay (dict): Bay with 'x', 'y', 'width', 'height' keys.
+        
+    Returns:
+        bool: True if position is within bay, False otherwise.
+    """
+    if not is_valid_bay(bay):
+        return False
+        
+    try:
+        x = float(position.get('x', 0))
+        y = float(position.get('y', 0))
+        bay_x = float(bay['x'])
+        bay_y = float(bay['y'])
+        bay_width = float(bay['width']) 
+        bay_height = float(bay['height'])
+        
+        return (bay_x <= x <= bay_x + bay_width and 
+                bay_y <= y <= bay_y + bay_height)
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error checking position in bay: {e}")
+        return False
 
 
 class SetupWizard(QWizard):
@@ -60,6 +111,8 @@ class SetupWizard(QWizard):
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.HaveHelpButton, True)
         self.helpRequested.connect(self.show_help)
+        
+        logger.info("Setup wizard initialized")
 
     def _validate_bays(self):
         """Validate and clean the bays configuration by removing invalid entries."""
@@ -72,7 +125,7 @@ class SetupWizard(QWizard):
 
         for bay_name in invalid_bays:
             del self.config["bays"][bay_name]
-            print(f"Removed invalid bay: {bay_name}")
+            logger.warning(f"Removed invalid bay: {bay_name}")
 
     def show_help(self):
         """Show help text for the current page."""
@@ -92,7 +145,9 @@ class SetupWizard(QWizard):
         try:
             with open('config_backup.json', 'w') as config_file:
                 json.dump(self.config, config_file, indent=2)
+            logger.info("Configuration backup saved to config_backup.json")
         except Exception as e:
+            logger.error(f"Failed to save configuration backup: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to save configuration backup: {e}")
 
 
@@ -178,6 +233,8 @@ class CADLoadPage(QWizardPage):
                 self.pdf_height_spin.setValue(100.0)
                 scale_layout.addWidget(self.pdf_height_spin, 2, 1)
                 self.pdf_fields.append(self.pdf_height_spin)
+                
+            logger.info(f"Selected CAD file: {file_path}")
 
     def validatePage(self):
         """Validate the page before proceeding.
@@ -186,12 +243,14 @@ class CADLoadPage(QWizardPage):
             bool: True if valid, False otherwise.
         """
         if "cad_file_path" not in self.config or not self.config.get("cad_file_path"):
+            logger.warning("No CAD file selected")
             QMessageBox.warning(self, "No File Selected", "Please select a CAD file.")
             return False
         self.config["cad_scale"] = self.scale_spin.value()
         if self.config.get("cad_file_path", "").lower().endswith('.pdf'):
             self.config["pdf_real_width"] = self.pdf_width_spin.value()
             self.config["pdf_real_height"] = self.pdf_height_spin.value()
+        logger.info("CAD page validated successfully")
         return True
 
 
@@ -245,6 +304,7 @@ class EquipmentConfigPage(QWizardPage):
             process_time_item = self.table.item(row, 2)
 
             if not (unit_type_item and capacity_item and process_time_item):
+                logger.warning(f"Missing data for equipment in row {row}")
                 QMessageBox.warning(self, "Invalid Input", f"Missing data for row {row}.")
                 return False
 
@@ -256,8 +316,10 @@ class EquipmentConfigPage(QWizardPage):
                     raise ValueError("Values must be positive integers")
                 self.config["units"][unit_type] = {"capacity": capacity, "process_time": process_time}
             except ValueError as e:
+                logger.error(f"Invalid data for {unit_type}: {e}", exc_info=True)
                 QMessageBox.warning(self, "Invalid Input", f"Invalid data for {unit_type}: {e}")
                 return False
+        logger.info("Equipment configuration validated successfully")
         return True
 
 
@@ -354,9 +416,22 @@ class PlacementPage(QWizardPage):
                 img_data = pix.tobytes("ppm")
                 self.background_pixmap = QPixmap()
                 self.background_pixmap.loadFromData(img_data)
+                logger.info(f"PDF background loaded successfully: {cad_file}")
             except Exception as e:
+                logger.error(f"Failed to load PDF: {e}", exc_info=True)
                 QMessageBox.warning(self, "PDF Load Error", f"Failed to load PDF: {e}")
                 self.background_pixmap = None
+
+    def check_bay_name_unique(self, bay_name):
+        """Check if the bay name is unique.
+        
+        Args:
+            bay_name (str): Name to check for uniqueness
+            
+        Returns:
+            bool: True if name is unique, False otherwise
+        """
+        return bay_name not in self.config["bays"]
 
     def eventFilter(self, obj, event):
         """Handle events for the scene widget.
@@ -384,11 +459,18 @@ class PlacementPage(QWizardPage):
                 if rect.width() > 10 and rect.height() > 10:
                     bay_name, ok = QInputDialog.getText(self, "Bay Name", "Enter bay name:")
                     if ok and bay_name:
-                        self.config["bays"][bay_name] = {
-                            "x": rect.x(), "y": rect.y(),
-                            "width": rect.width(), "height": rect.height()
-                        }
-                        self.bay_undo_stack.append((bay_name, self.config["bays"][bay_name]))
+                        # Check if bay name is unique
+                        if not self.check_bay_name_unique(bay_name):
+                            logger.warning(f"Bay name already exists: {bay_name}")
+                            QMessageBox.warning(self, "Duplicate Bay Name", 
+                                             f"Bay name '{bay_name}' already exists. Please choose a unique name.")
+                        else:
+                            self.config["bays"][bay_name] = {
+                                "x": rect.x(), "y": rect.y(),
+                                "width": rect.width(), "height": rect.height()
+                            }
+                            self.bay_undo_stack.append((bay_name, self.config["bays"][bay_name]))
+                            logger.info(f"Created new bay: {bay_name}")
                 self.bay_drawing = False
                 self.start_pos = None
                 self.current_rect = None
@@ -411,6 +493,7 @@ class PlacementPage(QWizardPage):
         """Start drawing a new bay."""
         self.bay_drawing = True
         self.current_rect = None
+        logger.info("Starting bay drawing mode")
 
     def undo_last_bay(self):
         """Undo the last drawn bay."""
@@ -418,6 +501,7 @@ class PlacementPage(QWizardPage):
             bay_name, _ = self.bay_undo_stack.pop()
             self.config["bays"].pop(bay_name, None)
             self.scene_widget.update()
+            logger.info(f"Removed bay: {bay_name}")
 
     def clear_bays(self):
         """Clear all bays from the configuration."""
@@ -425,6 +509,7 @@ class PlacementPage(QWizardPage):
         self.bay_undo_stack = []
         self.scene_widget.update()
         self.position_table.setRowCount(0)
+        logger.info("Cleared all bays")
 
     def zoom_in(self):
         """Zoom in the scene."""
@@ -463,6 +548,7 @@ class PlacementPage(QWizardPage):
             painter.drawText(rect, Qt.AlignCenter, bay_name)
 
         if invalid_bays:
+            logger.warning(f"Skipped drawing {len(invalid_bays)} invalid bays: {', '.join(invalid_bays)}")
             QMessageBox.warning(self, "Invalid Bays", f"Skipped drawing {len(invalid_bays)} invalid bays: {', '.join(invalid_bays)}")
 
     def render_equipment_items(self, painter=None):
@@ -489,11 +575,13 @@ class PlacementPage(QWizardPage):
         bays = self.config.get("bays", {})
         units = self.config.get("units", {})
         if not bays or not units:
+            logger.warning("Cannot position equipment: missing bays or units")
             QMessageBox.warning(self, "Configuration Error", "Define bays and equipment first.")
             return
         row = 0
         for bay_name, bay_pos in bays.items():
             if not is_valid_bay(bay_pos):
+                logger.warning(f"Skipping invalid bay: {bay_name}")
                 continue
             x_base = bay_pos["x"] + 10
             y_base = bay_pos["y"] + 10
@@ -505,11 +593,17 @@ class PlacementPage(QWizardPage):
                     self.position_table.setItem(row, 2, QTableWidgetItem(str(i)))
                     x_pos = x_base + (row % 3) * 50
                     y_pos = y_base + (row // 3) * 50
+                    
+                    # Ensure position is within bay boundaries
+                    x_pos = min(max(x_pos, bay_pos["x"] + 5), bay_pos["x"] + bay_pos["width"] - 5)
+                    y_pos = min(max(y_pos, bay_pos["y"] + 5), bay_pos["y"] + bay_pos["height"] - 5)
+                    
                     self.position_table.setItem(row, 3, QTableWidgetItem(str(x_pos)))
                     self.position_table.setItem(row, 4, QTableWidgetItem(str(y_pos)))
                     row += 1
         self.validatePage()
         self.scene_widget.update()
+        logger.info(f"Auto-positioned {row} equipment units across {len(bays)} bays")
 
     def validatePage(self):
         """Validate the equipment positions.
@@ -521,19 +615,37 @@ class PlacementPage(QWizardPage):
         for row in range(self.position_table.rowCount()):
             items = [self.position_table.item(row, col) for col in range(5)]
             if not all(items):
+                logger.warning(f"Missing data in row {row}")
                 QMessageBox.warning(self, "Invalid Input", f"Missing data in row {row}.")
                 return False
             bay, unit_type, unit_id, x_str, y_str = [item.text() for item in items]
             try:
                 x, y = float(x_str), float(y_str)
                 unit_id = int(unit_id)
+                
+                # Check if bay exists
+                if bay not in self.config["bays"]:
+                    logger.error(f"Bay '{bay}' does not exist")
+                    QMessageBox.warning(self, "Invalid Bay", f"Bay '{bay}' does not exist.")
+                    return False
+                    
+                # Check if position is within bay
+                position = {"x": x, "y": y}
+                if not is_position_in_bay(position, self.config["bays"][bay]):
+                    logger.error(f"Position ({x}, {y}) is outside of bay '{bay}'")
+                    QMessageBox.warning(self, "Invalid Position", 
+                                      f"Position ({x}, {y}) is outside of bay '{bay}'.")
+                    return False
+                
                 key = f"{unit_type}_{unit_id}_{bay}"
                 self.config["equipment_positions"][key] = {
                     "bay": bay, "type": unit_type, "id": unit_id, "x": x, "y": y
                 }
             except ValueError as e:
+                logger.error(f"Invalid position in row {row}: {e}", exc_info=True)
                 QMessageBox.warning(self, "Invalid Input", f"Invalid position in row {row}: {e}")
                 return False
+        logger.info("Equipment positions validated successfully")
         return True
 
 
@@ -615,6 +727,7 @@ class SummaryPage(QWizardPage):
     def initializePage(self):
         """Initialize the page with the current configuration summary."""
         self.summary_label.setText(self.generate_summary())
+        logger.info("Displaying configuration summary")
 
     def generate_summary(self):
         """Generate a summary of the configuration.
@@ -665,12 +778,24 @@ class SummaryPage(QWizardPage):
             try:
                 with open(file_path, 'w') as config_file:
                     json.dump(self.config, config_file, indent=2)
+                logger.info(f"Configuration saved to {file_path}")
                 QMessageBox.information(self, "Configuration Saved", f"Configuration saved to {file_path}")
             except Exception as e:
+                logger.error(f"Failed to save configuration: {e}", exc_info=True)
                 QMessageBox.critical(self, "Error", f"Failed to save configuration: {e}")
 
 
 if __name__ == '__main__':
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("setup_wizard.log")
+        ]
+    )
+    
     app = QApplication(sys.argv)
     wizard = SetupWizard()
     wizard.show()

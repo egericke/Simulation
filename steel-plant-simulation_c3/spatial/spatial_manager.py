@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple, Set
 from .bay import Bay  # Assuming Bay class is defined in bay.py
 
 logger = logging.getLogger(__name__)
@@ -24,13 +24,51 @@ class SpatialManager:
         self.ladle_car_paths: Dict[str, Dict[str, Any]] = {}
         self.bay_centers: Dict[str, Dict[str, float]] = {}
         self.path_cache: Dict[str, Dict[str, Any]] = {}
-
+        
+        # New: Cache for optimizing distance calculations and path lookups
+        self.bay_path_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self.distance_matrix: Dict[Tuple[str, str], float] = {}
+        self.common_paths: Dict[str, List[Dict[str, Any]]] = {}
+        
+        # New: Maximum cache sizes to prevent memory issues
+        self.MAX_PATH_CACHE_SIZE = 1000
+        self.MAX_DISTANCE_CACHE_SIZE = 5000
+        
         self._setup_bays()
         self._setup_default_paths()
+        self._precompute_common_paths()
 
         if not self.bays:
             logger.warning("SpatialManager initialized with no bays; check config['bays']")
         logger.info(f"SpatialManager initialized with {len(self.bays)} bays")
+
+    def update_config(self, config: Dict[str, Any]) -> None:
+        """
+        Update configuration and rebuild spatial data structures.
+        
+        Args:
+            config: New configuration dictionary
+        """
+        self.config = config
+        
+        # Clear caches when config changes
+        self.path_cache.clear()
+        self.bay_path_cache.clear()
+        self.distance_matrix.clear()
+        self.common_paths.clear()
+        
+        # Rebuild spatial structures
+        self.bays.clear()
+        self.bay_centers.clear()
+        self.equipment_locations.clear()
+        self.ladle_car_paths.clear()
+        
+        # Re-initialize with new config
+        self._setup_bays()
+        self._setup_default_paths()
+        self._precompute_common_paths()
+        
+        logger.info("SpatialManager updated with new configuration")
 
     def _setup_bays(self) -> None:
         """Create bay objects from configuration and cache their centers."""
@@ -58,7 +96,7 @@ class SpatialManager:
                 self.bay_centers[bay_id] = bay.get_center()
                 logger.debug(f"Created bay {bay_id} with top_left {top_left} and bottom_right {bottom_right}")
             except (KeyError, TypeError, ValueError) as e:
-                logger.error(f"Invalid data for bay {bay_id}: {e}")
+                logger.error(f"Invalid data for bay {bay_id}: {e}", exc_info=True)
 
     def _setup_default_paths(self) -> None:
         """Create default paths between bays for ladle cars with actual distance calculations."""
@@ -71,9 +109,7 @@ class SpatialManager:
             bay1, bay2 = bay_list[i], bay_list[i + 1]
             center1 = self.bay_centers[bay1.bay_id]
             center2 = self.bay_centers[bay2.bay_id]
-            dx = center2["x"] - center1["x"]
-            dy = center2["y"] - center1["y"]
-            distance = (dx**2 + dy**2)**0.5
+            distance = self._calculate_distance(center1, center2)
             travel_time = distance / default_speed
             path_key = f"{bay1.bay_id}_to_{bay2.bay_id}"
             self.ladle_car_paths[path_key] = {
@@ -89,6 +125,82 @@ class SpatialManager:
                 "travel_time": travel_time
             }
             logger.debug(f"Created path {path_key}: distance {distance:.2f}, time {travel_time:.2f} min")
+            
+            # Store in distance matrix
+            self.distance_matrix[(bay1.bay_id, bay2.bay_id)] = distance
+            self.distance_matrix[(bay2.bay_id, bay1.bay_id)] = distance
+
+    def _precompute_common_paths(self) -> None:
+        """Precompute common paths between all bays for each car type."""
+        # Only if we have multiple bays
+        if len(self.bays) < 2:
+            return
+            
+        # Get all bay IDs
+        bay_ids = list(self.bays.keys())
+        car_types = ["tapping", "treatment", "rh", None]
+        
+        # Generate all paths between bays for each car type
+        for i, from_bay in enumerate(bay_ids):
+            for j, to_bay in enumerate(bay_ids):
+                if i != j:  # Don't need paths from a bay to itself
+                    for car_type in car_types:
+                        key = f"{from_bay}_to_{to_bay}_{car_type}"
+                        path = self._generate_path_between_bays(from_bay, to_bay, car_type)
+                        if path:
+                            self.common_paths[key] = path
+        
+        logger.info(f"Precomputed {len(self.common_paths)} common paths between bays")
+
+    def _generate_path_between_bays(self, from_bay_id: str, to_bay_id: str, car_type: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+        """Generate a path between bays without caching it."""
+        if from_bay_id not in self.bays or to_bay_id not in self.bays:
+            return None
+            
+        start = self.bay_centers[from_bay_id]
+        end = self.bay_centers[to_bay_id]
+        waypoints = []
+        if car_type in ["tapping", "treatment"]:
+            intermediate = {"x": end["x"], "y": start["y"]}
+            waypoints = [start, intermediate, end]
+        else:
+            waypoints = [start, end]
+
+        segments = []
+        ladle_car_speed = self.config.get("ladle_car_speed", 150)
+        if ladle_car_speed <= 0:
+            return None
+            
+        for i in range(len(waypoints) - 1):
+            p1 = waypoints[i]
+            p2 = waypoints[i + 1]
+            distance = self._calculate_distance(p1, p2)
+            travel_time = distance / ladle_car_speed
+            segments.append({
+                "from": p1,
+                "to": p2,
+                "distance": distance,
+                "travel_time": travel_time
+            })
+        return segments
+
+    def _calculate_distance(self, point1: Dict[str, float], point2: Dict[str, float]) -> float:
+        """Calculate Euclidean distance between two points.
+        
+        Args:
+            point1: First point with 'x' and 'y' keys
+            point2: Second point with 'x' and 'y' keys
+            
+        Returns:
+            float: Euclidean distance
+        """
+        try:
+            dx = point2["x"] - point1["x"]
+            dy = point2["y"] - point1["y"]
+            return (dx**2 + dy**2)**0.5
+        except (KeyError, TypeError) as e:
+            logger.error(f"Error calculating distance: {e}", exc_info=True)
+            return 100.0  # Default fallback if calculation fails
 
     def get_bay_at_position(self, x: float, y: float) -> Optional[str]:
         """
@@ -132,7 +244,15 @@ class SpatialManager:
         if unit_id not in self.equipment_locations:
             logger.warning(f"Unit {unit_id} not found in equipment_locations")
             return {"x": 0, "y": 0}
-        return self.equipment_locations[unit_id]["position"]
+            
+        # Fixed: Check if 'position' key exists, otherwise use x/y directly
+        if "position" in self.equipment_locations[unit_id]:
+            return self.equipment_locations[unit_id]["position"]
+        elif "x" in self.equipment_locations[unit_id] and "y" in self.equipment_locations[unit_id]:
+            return {"x": self.equipment_locations[unit_id]["x"], "y": self.equipment_locations[unit_id]["y"]}
+        else:
+            logger.error(f"Invalid position format for unit {unit_id}")
+            return {"x": 0, "y": 0}
 
     def place_equipment(self, equipment_id: str, equipment_type: str, bay_id: str, position: Dict[str, float]) -> bool:
         """
@@ -183,44 +303,72 @@ class SpatialManager:
 
         from_bay = self.equipment_locations[from_equipment_id]["bay_id"]
         to_bay = self.equipment_locations[to_equipment_id]["bay_id"]
-        from_pos = self.equipment_locations[from_equipment_id]["position"]
-        to_pos = self.equipment_locations[to_equipment_id]["position"]
+        from_pos = self.get_unit_position(from_equipment_id)
+        to_pos = self.get_unit_position(to_equipment_id)
 
+        # Check cache first
         cache_key = f"{from_equipment_id}_to_{to_equipment_id}"
         if cache_key in self.path_cache:
             return self.path_cache[cache_key]
+
+        # Manage cache size
+        if len(self.path_cache) >= self.MAX_PATH_CACHE_SIZE:
+            # Remove a random entry (could be improved with LRU)
+            self.path_cache.pop(next(iter(self.path_cache)))
 
         ladle_car_speed = self.config.get("ladle_car_speed", 150)
         if ladle_car_speed <= 0:
             logger.error("Ladle car speed must be positive")
             return None
 
-        if from_bay == to_bay:
-            dx = to_pos["x"] - from_pos["x"]
-            dy = to_pos["y"] - from_pos["y"]
-            distance = (dx**2 + dy**2)**0.5
-            travel_time = distance / ladle_car_speed
-            path = {
-                "waypoints": [from_pos, to_pos],
-                "distance": distance,
-                "travel_time": travel_time
+        try:
+            if from_bay == to_bay:
+                # Same bay - direct path
+                distance = self._calculate_distance(from_pos, to_pos)
+                travel_time = distance / ladle_car_speed
+                path = {
+                    "waypoints": [from_pos, to_pos],
+                    "distance": distance,
+                    "travel_time": travel_time
+                }
+            else:
+                # Different bays - via bay centers
+                path_key = f"{from_bay}_to_{to_bay}"
+                if path_key not in self.ladle_car_paths:
+                    logger.warning(f"No path found between bays {from_bay} and {to_bay}")
+                    return None
+                    
+                bay_path = self.ladle_car_paths[path_key]
+                waypoints = [from_pos] + bay_path["waypoints"] + [to_pos]
+                
+                # Calculate total distance more accurately
+                total_distance = 0
+                for i in range(len(waypoints) - 1):
+                    total_distance += self._calculate_distance(waypoints[i], waypoints[i+1])
+                    
+                total_time = total_distance / ladle_car_speed
+                path = {
+                    "waypoints": waypoints,
+                    "distance": total_distance,
+                    "travel_time": total_time
+                }
+                
+            # Store in cache
+            self.path_cache[cache_key] = path
+            
+            # Cache the reverse path too
+            reverse_key = f"{to_equipment_id}_to_{from_equipment_id}"
+            reverse_path = {
+                "waypoints": list(reversed(path["waypoints"])),
+                "distance": path["distance"],
+                "travel_time": path["travel_time"]
             }
-        else:
-            path_key = f"{from_bay}_to_{to_bay}"
-            if path_key not in self.ladle_car_paths:
-                logger.warning(f"No path found between bays {from_bay} and {to_bay}")
-                return None
-            bay_path = self.ladle_car_paths[path_key]
-            waypoints = [from_pos] + bay_path["waypoints"] + [to_pos]
-            total_distance = bay_path["distance"] + 50  # Buffer for equipment offset
-            total_time = total_distance / ladle_car_speed
-            path = {
-                "waypoints": waypoints,
-                "distance": total_distance,
-                "travel_time": total_time
-            }
-        self.path_cache[cache_key] = path
-        return path
+            self.path_cache[reverse_key] = reverse_path
+            
+            return path
+        except Exception as e:
+            logger.error(f"Error calculating path between equipment: {e}", exc_info=True)
+            return None
 
     def check_crane_collisions(self, time: float) -> Dict[str, bool]:
         """
@@ -255,37 +403,38 @@ class SpatialManager:
         Returns:
             list or None: List of path segments with 'from', 'to', 'distance', 'travel_time'
         """
+        # Validate bay ids
         if from_bay_id not in self.bays or to_bay_id not in self.bays:
             logger.error(f"One or both bays {from_bay_id} and {to_bay_id} not found")
             return None
-
-        start = self.bay_centers[from_bay_id]
-        end = self.bay_centers[to_bay_id]
-        waypoints = []
-        if car_type in ["tapping", "treatment"]:
-            intermediate = {"x": end["x"], "y": start["y"]}
-            waypoints = [start, intermediate, end]
-        else:
-            waypoints = [start, end]
-
-        segments = []
-        ladle_car_speed = self.config.get("ladle_car_speed", 150)
-        if ladle_car_speed <= 0:
-            logger.error("Ladle car speed must be positive")
+            
+        # Check if it's the same bay
+        if from_bay_id == to_bay_id:
+            center = self.bay_centers[from_bay_id]
+            return [{
+                "from": center,
+                "to": center,
+                "distance": 0,
+                "travel_time": 0
+            }]
+            
+        # Check precomputed paths cache first
+        cache_key = f"{from_bay_id}_to_{to_bay_id}_{car_type}"
+        if cache_key in self.common_paths:
+            return self.common_paths[cache_key]
+            
+        # Check bay path cache
+        if cache_key in self.bay_path_cache:
+            return self.bay_path_cache[cache_key]
+            
+        # If not in cache, generate the path
+        segments = self._generate_path_between_bays(from_bay_id, to_bay_id, car_type)
+        if not segments:
+            logger.warning(f"Failed to generate path from {from_bay_id} to {to_bay_id} for car type {car_type}")
             return None
-        for i in range(len(waypoints) - 1):
-            p1 = waypoints[i]
-            p2 = waypoints[i + 1]
-            dx = p2["x"] - p1["x"]
-            dy = p2["y"] - p1["y"]
-            distance = (dx**2 + dy**2)**0.5
-            travel_time = distance / ladle_car_speed
-            segments.append({
-                "from": p1,
-                "to": p2,
-                "distance": distance,
-                "travel_time": travel_time
-            })
+            
+        # Store in cache
+        self.bay_path_cache[cache_key] = segments
         logger.info(f"Generated path from {from_bay_id} to {to_bay_id} for {car_type}: {len(segments)} segments")
         return segments
 
@@ -326,3 +475,60 @@ class SpatialManager:
             logger.warning(f"Bay {bay_id} not found in bay_centers; returning default position")
             return {"x": 0, "y": 0}
         return self.bay_centers[bay_id]
+        
+    def get_unit_at_location(self, location_id: str) -> Optional[Any]:
+        """
+        Get the unit object at a given location ID.
+        
+        Args:
+            location_id: Location identifier 
+            
+        Returns:
+            Any: Unit object or None if not found
+        """
+        # This is a stub - would be implemented based on how units are stored
+        # in the simulation environment
+        logger.warning(f"get_unit_at_location not fully implemented; called with {location_id}")
+        return None
+        
+    def is_unit_in_bay(self, unit_id: str, bay_id: str) -> bool:
+        """
+        Check if a unit is located in a specific bay.
+        
+        Args:
+            unit_id: Unit identifier
+            bay_id: Bay identifier
+            
+        Returns:
+            bool: True if unit is in bay, False otherwise
+        """
+        if unit_id not in self.equipment_locations:
+            logger.warning(f"Unit {unit_id} not found in equipment_locations")
+            return False
+            
+        unit_bay = self.equipment_locations[unit_id].get("bay_id")
+        return unit_bay == bay_id
+        
+    def clear_caches(self) -> None:
+        """
+        Clear all spatial caches to free memory.
+        """
+        self.path_cache.clear()
+        self.bay_path_cache.clear()
+        self.distance_matrix.clear()
+        self.common_paths.clear()
+        logger.info("All spatial caches cleared")
+        
+    def get_cache_stats(self) -> Dict[str, int]:
+        """
+        Get statistics about the cache usage.
+        
+        Returns:
+            dict: Cache size statistics
+        """
+        return {
+            "path_cache_size": len(self.path_cache),
+            "bay_path_cache_size": len(self.bay_path_cache),
+            "distance_matrix_size": len(self.distance_matrix),
+            "common_paths_size": len(self.common_paths)
+        }
