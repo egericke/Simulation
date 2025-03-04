@@ -358,6 +358,15 @@ class SimulationService:
                 logger.info(f"Loading configuration version {loaded_version}, saved at {save_time}")
                 new_config.pop("_metadata")
             
+            # Ensure equipment_positions and bays exist
+            if "equipment_positions" not in new_config:
+                new_config["equipment_positions"] = {}
+                logger.warning("Missing equipment_positions in config, initializing empty dict")
+                
+            if "bays" not in new_config:
+                new_config["bays"] = {}
+                logger.warning("Missing bays in config, initializing empty dict")
+            
             # Validate configuration
             try:
                 self._validate_config(new_config)
@@ -378,6 +387,10 @@ class SimulationService:
             else:
                 self.spatial_manager = SpatialManager(self.config)
             
+            # Update transport manager if available
+            if self.transport_manager and hasattr(self.transport_manager, 'update_config'):
+                self.transport_manager.update_config(self.config)
+                
             logger.info(f"Configuration loaded from {file_path}")
             return True
         except json.JSONDecodeError:

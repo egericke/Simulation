@@ -100,13 +100,16 @@ class SetupWizard(QWizard):
             self.config["bays"] = {}
 
         self._validate_bays()
+        
+        # Store reference to simulation service
+        self.sim_service = sim_service
 
         self.addPage(CADLoadPage(self.config))
         self.addPage(EquipmentConfigPage(self.config))
         self.addPage(PlacementPage(self.config))
         self.addPage(ProductionParametersPage(self.config))
         self.addPage(TransportationConfigPage(self.config))
-        self.addPage(SummaryPage(self.config))
+        self.addPage(SummaryPage(self.config, self.sim_service))
 
         self.setWizardStyle(QWizard.ModernStyle)
         self.setOption(QWizard.HaveHelpButton, True)
@@ -146,6 +149,10 @@ class SetupWizard(QWizard):
             with open('config_backup.json', 'w') as config_file:
                 json.dump(self.config, config_file, indent=2)
             logger.info("Configuration backup saved to config_backup.json")
+            
+            # Update SimulationService if available
+            if hasattr(self, 'sim_service') and self.sim_service:
+                self.sim_service.update_config(self.config)
         except Exception as e:
             logger.error(f"Failed to save configuration backup: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to save configuration backup: {e}")
@@ -267,20 +274,26 @@ class EquipmentConfigPage(QWizardPage):
         super().__init__(parent)
         self.config = config
         self.setTitle("Equipment Configuration")
-        self.setSubTitle("Define the number of each equipment type and their process times.")
+        self.setSubTitle("Define the number of each equipment type and their process times and sizes.")
         layout = QVBoxLayout()
 
-        self.table = QTableWidget(4, 3)
-        self.table.setHorizontalHeaderLabels(["Equipment Type", "Capacity", "Process Time (min)"])
+        self.table = QTableWidget(4, 5)  # Add columns for width and height
+        self.table.setHorizontalHeaderLabels(["Equipment Type", "Capacity", "Process Time (min)", "Width (units)", "Height (units)"])
         equipment_types = ["EAF", "LMF", "Degasser", "Caster"]
         default_process_times = {"EAF": 50, "LMF": 30, "Degasser": 40, "Caster": 20}
+        default_sizes = {"EAF": {"width": 20, "height": 40}, "LMF": {"width": 15, "height": 30}, 
+                         "Degasser": {"width": 15, "height": 30}, "Caster": {"width": 25, "height": 50}}
 
         for row, unit_type in enumerate(equipment_types):
             self.table.setItem(row, 0, QTableWidgetItem(unit_type))
             capacity = self.config.get("units", {}).get(unit_type, {}).get("capacity", 1)
             process_time = self.config.get("units", {}).get(unit_type, {}).get("process_time", default_process_times[unit_type])
+            width = self.config.get("units", {}).get(unit_type, {}).get("width", default_sizes[unit_type]["width"])
+            height = self.config.get("units", {}).get(unit_type, {}).get("height", default_sizes[unit_type]["height"])
             self.table.setItem(row, 1, QTableWidgetItem(str(capacity)))
             self.table.setItem(row, 2, QTableWidgetItem(str(process_time)))
+            self.table.setItem(row, 3, QTableWidgetItem(str(width)))
+            self.table.setItem(row, 4, QTableWidgetItem(str(height)))
 
         layout.addWidget(self.table)
         self.setLayout(layout)
@@ -288,7 +301,8 @@ class EquipmentConfigPage(QWizardPage):
         self.helpText = (
             "Configure your steel plant equipment:\n\n"
             "1. Capacity: Number of units for each equipment type.\n"
-            "2. Process Time: Duration in minutes each unit takes to process a heat."
+            "2. Process Time: Duration in minutes each unit takes to process a heat.\n"
+            "3. Width & Height: Equipment dimensions for layout visualization."
         )
 
     def validatePage(self):
@@ -302,8 +316,10 @@ class EquipmentConfigPage(QWizardPage):
             unit_type_item = self.table.item(row, 0)
             capacity_item = self.table.item(row, 1)
             process_time_item = self.table.item(row, 2)
+            width_item = self.table.item(row, 3)
+            height_item = self.table.item(row, 4)
 
-            if not (unit_type_item and capacity_item and process_time_item):
+            if not (unit_type_item and capacity_item and process_time_item and width_item and height_item):
                 logger.warning(f"Missing data for equipment in row {row}")
                 QMessageBox.warning(self, "Invalid Input", f"Missing data for row {row}.")
                 return False
@@ -312,9 +328,16 @@ class EquipmentConfigPage(QWizardPage):
             try:
                 capacity = int(capacity_item.text())
                 process_time = int(process_time_item.text())
-                if capacity < 1 or process_time < 1:
+                width = int(width_item.text())
+                height = int(height_item.text())
+                if capacity < 1 or process_time < 1 or width < 1 or height < 1:
                     raise ValueError("Values must be positive integers")
-                self.config["units"][unit_type] = {"capacity": capacity, "process_time": process_time}
+                self.config["units"][unit_type] = {
+                    "capacity": capacity,
+                    "process_time": process_time,
+                    "width": width,
+                    "height": height
+                }
             except ValueError as e:
                 logger.error(f"Invalid data for {unit_type}: {e}", exc_info=True)
                 QMessageBox.warning(self, "Invalid Input", f"Invalid data for {unit_type}: {e}")
@@ -348,24 +371,36 @@ class PlacementPage(QWizardPage):
         preview_layout.addWidget(self.scene_widget)
 
         controls_layout = QVBoxLayout()
+        
+        # Enhanced button styling for better visibility
         draw_bay_btn = QPushButton("Draw Bay")
+        draw_bay_btn.setStyleSheet("background-color: #4CAF50; color: white; font-size: 14px; padding: 5px;")
         draw_bay_btn.clicked.connect(self.start_drawing_bay)
+        draw_bay_btn.setToolTip("Click to start drawing a bay on the layout")
         controls_layout.addWidget(draw_bay_btn)
 
         undo_bay_btn = QPushButton("Undo Last Bay")
+        undo_bay_btn.setStyleSheet("background-color: #f44336; color: white; font-size: 14px; padding: 5px;")
         undo_bay_btn.clicked.connect(self.undo_last_bay)
+        undo_bay_btn.setToolTip("Undo the last bay addition")
         controls_layout.addWidget(undo_bay_btn)
 
         clear_bays_btn = QPushButton("Clear All Bays")
+        clear_bays_btn.setStyleSheet("background-color: #2196F3; color: white; font-size: 14px; padding: 5px;")
         clear_bays_btn.clicked.connect(self.clear_bays)
+        clear_bays_btn.setToolTip("Clear all bays from the layout")
         controls_layout.addWidget(clear_bays_btn)
 
         zoom_in_btn = QPushButton("Zoom In")
+        zoom_in_btn.setStyleSheet("background-color: #9C27B0; color: white; font-size: 14px; padding: 5px;")
         zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_in_btn.setToolTip("Zoom in on the layout")
         controls_layout.addWidget(zoom_in_btn)
 
         zoom_out_btn = QPushButton("Zoom Out")
+        zoom_out_btn.setStyleSheet("background-color: #9C27B0; color: white; font-size: 14px; padding: 5px;")
         zoom_out_btn.clicked.connect(self.zoom_out)
+        zoom_out_btn.setToolTip("Zoom out on the layout")
         controls_layout.addWidget(zoom_out_btn)
 
         controls_layout.addStretch()
@@ -560,14 +595,20 @@ class PlacementPage(QWizardPage):
         if painter is None:
             painter = QPainter(self.scene_widget)
         positions = self.config.get("equipment_positions", {})
-        for pos in positions.values():
+        units = self.config.get("units", {})
+        for key, pos in positions.items():
             x = pos.get("x", 0)
             y = pos.get("y", 0)
+            unit_type = pos.get("type", "Unknown")
+            unit_size = units.get(unit_type, {"width": 10, "height": 10})
+            width = unit_size.get("width", 10)
+            height = unit_size.get("height", 10)
+            
             painter.setPen(QPen(Qt.blue, 1 / self.zoom_factor))
             painter.setBrush(QColor(0, 0, 255, 100))
-            painter.drawEllipse(int(x - 5), int(y - 5), 10, 10)
+            painter.drawRect(int(x - width/2), int(y - height/2), width, height)
             label = f"{pos.get('type', 'Unknown')}{pos.get('id', 'Unknown')}"
-            painter.drawText(int(x + 10), int(y + 5), label)
+            painter.drawText(int(x + width/2 + 5), int(y + height/2), label)
 
     def auto_position_equipment(self):
         """Automatically position equipment within bays."""
@@ -585,21 +626,25 @@ class PlacementPage(QWizardPage):
                 continue
             x_base = bay_pos["x"] + 10
             y_base = bay_pos["y"] + 10
+            bay_width = bay_pos["width"] - 20  # Margin
+            bay_height = bay_pos["height"] - 20
             for unit_type, unit_config in units.items():
                 for i in range(unit_config.get("capacity", 0)):
                     self.position_table.insertRow(row)
                     self.position_table.setItem(row, 0, QTableWidgetItem(bay_name))
                     self.position_table.setItem(row, 1, QTableWidgetItem(unit_type))
                     self.position_table.setItem(row, 2, QTableWidgetItem(str(i)))
-                    x_pos = x_base + (row % 3) * 50
-                    y_pos = y_base + (row // 3) * 50
+                    width = unit_config.get("width", 10)
+                    height = unit_config.get("height", 10)
+                    x_pos = x_base + (row % 3) * (width + 10)  # Spacing based on width
+                    y_pos = y_base + (row // 3) * (height + 10)
                     
-                    # Ensure position is within bay boundaries
-                    x_pos = min(max(x_pos, bay_pos["x"] + 5), bay_pos["x"] + bay_pos["width"] - 5)
-                    y_pos = min(max(y_pos, bay_pos["y"] + 5), bay_pos["y"] + bay_pos["height"] - 5)
-                    
-                    self.position_table.setItem(row, 3, QTableWidgetItem(str(x_pos)))
-                    self.position_table.setItem(row, 4, QTableWidgetItem(str(y_pos)))
+                    # Ensure fit within bay
+                    x_pos = min(max(x_pos, bay_pos["x"] + 5), bay_pos["x"] + bay_width - width - 5)
+                    y_pos = min(max(y_pos, bay_pos["y"] + 5), bay_pos["y"] + bay_height - height - 5)
+
+                    self.position_table.setItem(row, 3, QTableWidgetItem(str(x_pos + width/2)))  # Center X
+                    self.position_table.setItem(row, 4, QTableWidgetItem(str(y_pos + height/2)))  # Center Y
                     row += 1
         self.validatePage()
         self.scene_widget.update()
@@ -829,15 +874,17 @@ class TransportationConfigPage(QWizardPage):
 class SummaryPage(QWizardPage):
     """Page for reviewing the configuration summary."""
 
-    def __init__(self, config, parent=None):
+    def __init__(self, config, sim_service=None, parent=None):
         """Initialize the summary page.
 
         Args:
             config (dict): The configuration dictionary.
+            sim_service: SimulationService instance (optional).
             parent (QWidget, optional): Parent widget. Defaults to None.
         """
         super().__init__(parent)
         self.config = config
+        self.sim_service = sim_service
         self.setTitle("Configuration Summary")
         self.setSubTitle("Review your settings before finishing.")
         layout = QVBoxLayout()
@@ -893,7 +940,8 @@ class SummaryPage(QWizardPage):
         summary += "<h3>Equipment Configuration</h3>"
         units = self.config.get("units", {})
         for unit_type, unit_config in units.items():
-            summary += f"<b>{unit_type}:</b> Capacity: {unit_config.get('capacity', 1)}, Process Time: {unit_config.get('process_time', 30)} min<br>"
+            summary += f"<b>{unit_type}:</b> Capacity: {unit_config.get('capacity', 1)}, Process Time: {unit_config.get('process_time', 30)} min"
+            summary += f", Width: {unit_config.get('width', 10)}, Height: {unit_config.get('height', 10)}<br>"
         summary += "<br>"
 
         summary += "<h3>Equipment Positions</h3>"
@@ -911,10 +959,18 @@ class SummaryPage(QWizardPage):
         )
         if file_path:
             try:
+                # Ensure equipment_positions and bays are included
+                self.config["equipment_positions"] = self.config.get("equipment_positions", {})
+                self.config["bays"] = self.config.get("bays", {})
+                
                 with open(file_path, 'w') as config_file:
                     json.dump(self.config, config_file, indent=2)
                 logger.info(f"Configuration saved to {file_path}")
                 QMessageBox.information(self, "Configuration Saved", f"Configuration saved to {file_path}")
+                
+                # Update SimulationService if available
+                if hasattr(self, 'sim_service') and self.sim_service:
+                    self.sim_service.update_config(self.config)
             except Exception as e:
                 logger.error(f"Failed to save configuration: {e}", exc_info=True)
                 QMessageBox.critical(self, "Error", f"Failed to save configuration: {e}")
