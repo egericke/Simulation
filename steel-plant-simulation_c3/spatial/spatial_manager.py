@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, List, Optional, Any, Tuple, Set
+
 from .bay import Bay  # Assuming Bay class is defined in bay.py
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class SpatialManager:
         self.MAX_DISTANCE_CACHE_SIZE = 5000
         
         self._setup_bays()
+        self._load_ladle_car_paths()
         self._setup_default_paths()
         self._precompute_common_paths()
 
@@ -65,11 +67,37 @@ class SpatialManager:
         
         # Re-initialize with new config
         self._setup_bays()
+        self._load_ladle_car_paths()
         self._setup_default_paths()
         self._precompute_common_paths()
         
         logger.info("SpatialManager updated with new configuration")
 
+    def _load_ladle_car_paths(self) -> None:
+        """Load ladle car paths from configuration."""
+        path_config = self.config.get("ladle_car_paths", {})
+        if not path_config:
+            logger.info("No ladle car paths defined in configuration")
+            return
+            
+        paths_loaded = 0
+        for bay_name, paths in path_config.items():
+            for path in paths:
+                path_id = path.get("path_id")
+                if not path_id:
+                    logger.warning(f"Path without ID in bay {bay_name} skipped")
+                    continue
+                    
+                waypoints = path.get("waypoints", [])
+                if len(waypoints) < 2:
+                    logger.warning(f"Path {path_id} in bay {bay_name} has insufficient waypoints: {len(waypoints)}")
+                    continue
+                    
+                self.ladle_car_paths[f"{bay_name}_path_{path_id}"] = path
+                paths_loaded += 1
+                
+        logger.info(f"Loaded {paths_loaded} ladle car paths from configuration")
+      
     def _setup_bays(self) -> None:
         """Create bay objects from configuration and cache their centers."""
         bays_config = self.config.get("bays", {})
@@ -532,3 +560,20 @@ class SpatialManager:
             "distance_matrix_size": len(self.distance_matrix),
             "common_paths_size": len(self.common_paths)
         }
+        
+    def get_ladle_car_paths(self, bay_name: str) -> List[Dict[str, Any]]:
+        """Return list of paths for a bay."""
+        paths = []
+        path_prefix = f"{bay_name}_path_"
+        for key, path in self.ladle_car_paths.items():
+            if key.startswith(path_prefix):
+                paths.append(path)
+        return paths
+
+    def get_path(self, bay_name: str, path_id: int) -> Optional[List[Dict[str, float]]]:
+        """Return waypoints for a specific path."""
+        path_key = f"{bay_name}_path_{path_id}"
+        if path_key in self.ladle_car_paths:
+            return self.ladle_car_paths[path_key].get("waypoints", [])
+        logger.warning(f"Path ID {path_id} not found in bay {bay_name}")
+        return None

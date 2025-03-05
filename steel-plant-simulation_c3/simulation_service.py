@@ -358,7 +358,7 @@ class SimulationService:
                 logger.info(f"Loading configuration version {loaded_version}, saved at {save_time}")
                 new_config.pop("_metadata")
             
-            # Ensure equipment_positions and bays exist
+            # Ensure equipment_positions, bays, and ladle_car_paths exist
             if "equipment_positions" not in new_config:
                 new_config["equipment_positions"] = {}
                 logger.warning("Missing equipment_positions in config, initializing empty dict")
@@ -366,6 +366,10 @@ class SimulationService:
             if "bays" not in new_config:
                 new_config["bays"] = {}
                 logger.warning("Missing bays in config, initializing empty dict")
+                
+            if "ladle_car_paths" not in new_config:
+                new_config["ladle_car_paths"] = {}
+                logger.warning("Missing ladle_car_paths in config, initializing empty dict")
             
             # Validate configuration
             try:
@@ -496,7 +500,8 @@ class SimulationService:
         try:
             layout = {
                 "bays": self.config.get("bays", {}),
-                "equipment_positions": self.config.get("equipment_positions", {})
+                "equipment_positions": self.config.get("equipment_positions", {}),
+                "ladle_car_paths": self.config.get("ladle_car_paths", {})
             }
             
             with open(file_path, 'w') as f:
@@ -530,6 +535,7 @@ class SimulationService:
             # Update configuration
             self.config["bays"] = layout.get("bays", {})
             self.config["equipment_positions"] = layout.get("equipment_positions", {})
+            self.config["ladle_car_paths"] = layout.get("ladle_car_paths", {})
             
             # Update spatial manager
             if hasattr(self.spatial_manager, 'update_config'):
