@@ -274,6 +274,42 @@ class TransportManager:
             for item in new_queue:
                 heappush(self.pending_requests, item)
 
+    def move_ladle_along_path(self, bay_name, path_id, ladle):
+        """Assign a ladle car to move a ladle along a specific path."""
+        path = self.spatial_manager.get_path(bay_name, path_id)
+        if not path:
+            logger.error(f"No path found for bay {bay_name}, ID {path_id}")
+            return False
+        car = self.get_available_ladle_car(bay_name)
+        if not car:
+            logger.warning(f"No available ladle car in bay {bay_name}")
+            return False
+        car.current_ladle = ladle
+        car.current_heat = ladle.current_heat if hasattr(ladle, "current_heat") else None
+        car.assign_path(path)
+        logger.info(f"Assigned {car.name()} to move ladle along path {path_id} in {bay_name}")
+        return True
+    
+    def get_available_ladle_car(self, bay_name):
+        """
+        Get an available ladle car in the specified bay.
+        
+        Args:
+            bay_name: Bay ID where car is needed
+            
+        Returns:
+            BaseLadleCar: Available car or None
+        """
+        available_cars = [car for car in self._ladle_cars 
+                        if car.current_bay == bay_name and car.is_available()]
+        
+        if available_cars:
+            return available_cars[0]
+        
+        # If no car is available in the target bay, find the closest available car
+        available_cars = [car for car in self._ladle_cars if car.is_available()]
+        return self._find_closest_car(available_cars, bay_name)
+
     def _find_closest_car(self, available_cars, target_bay):
         """
         Find the closest car to a target bay based on distance.

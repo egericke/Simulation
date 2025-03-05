@@ -58,7 +58,8 @@ class BaseLadleCar(sim.Component):
         self.current_heat = None
         self.current_ladle = None
         self.destination = None
-        self.path = []
+        self.current_path = None  # List of waypoints or None
+        self.path = []  # Keep for backward compatibility
         self.move_queue = []  # Ensure move_queue is initialized
         self.current_path_segment = 0
         self.total_distance_traveled = 0.0
@@ -153,6 +154,17 @@ class BaseLadleCar(sim.Component):
                         return False
         return True
 
+    def assign_path(self, waypoints):
+        """Assign a path for the ladle car to follow."""
+        if not waypoints or len(waypoints) < 2:
+            logger.error(f"Invalid path assigned to {self.name()}: {waypoints}")
+            return False
+        self.current_path = waypoints.copy()
+        self.current_path_segment = 0
+        self.set_status("moving")
+        logger.info(f"{self.name()} assigned path with {len(waypoints)} waypoints")
+        return True
+
     def process(self):
         """
         Main process loop for the ladle car.
@@ -186,85 +198,47 @@ class BaseLadleCar(sim.Component):
 
                 elif current_status == "moving":
                     try:
-                        # Path validation
-                        if not self.path or self.current_path_segment >= len(self.path):
-                            logger.warning(f"{self.name()} in 'moving' state with invalid path; resetting to idle",
-                                          extra={"component": "ladle_car", "car_id": self.car_id})
+                        if not self.current_path or self.current_path_segment >= len(self.current_path):
+                            logger.warning(f"{self.name()} in 'moving' state with no valid path; resetting to idle")
                             self.set_status("idle")
-                            self.path = []
+                            self.current_path = None
                             self.current_path_segment = 0
                             self.destination = None
                             continue
 
-                        segment = self.path[self.current_path_segment]
-                        travel_time = segment.get("travel_time", 0)
-                        to_point = segment.get("to", {"x": 0, "y": 0})
+                        next_waypoint = self.current_path[self.current_path_segment]
+                        from_x = float(self.position.get("x", 0))
+                        from_y = float(self.position.get("y", 0))
+                        to_x = float(next_waypoint.get("x", 0))
+                        to_y = float(next_waypoint.get("y", 0))
+                        distance = ((from_x - to_x) ** 2 + (from_y - to_y) ** 2) ** 0.5
+                        travel_time = distance / self.speed if self.speed > 0 else 1
 
-                        # Validate travel time
-                        if travel_time <= 0:
-                            logger.warning(f"Invalid travel time {travel_time} for segment; using default 1 unit", 
-                                          extra={"component": "ladle_car", "car_id": self.car_id})
-                            travel_time = 1
-
-                        # Calculate distance for this segment
-                        try:
-                            from_x = float(self.position.get('x', 0))
-                            from_y = float(self.position.get('y', 0))
-                            to_x = float(to_point.get('x', 0))
-                            to_y = float(to_point.get('y', 0))
-                            distance = ((from_x - to_x)**2 + (from_y - to_y)**2)**0.5
-                            self.total_distance_traveled += distance
-                        except (ValueError, TypeError, AttributeError) as e:
-                            logger.error(f"Error calculating distance for {self.name()}: {e}", exc_info=True)
-                            distance = 10  # Default fallback
-                            
-                        # Record movement metrics
                         start_time = self.env.now()
-
-                        logger.info(f"{self.name()} moving from ({self.position.get('x', 0)}, {self.position.get('y', 0)}) "
-                                   f"to ({to_point.get('x', 0)}, {to_point.get('y', 0)}), ETA: {travel_time:.1f} min",
-                                   extra={"component": "ladle_car", "car_id": self.car_id, 
-                                          "from": self.position, "to": to_point, "eta": travel_time})
+                        logger.info(f"{self.name()} moving to waypoint ({to_x}, {to_y}), ETA: {travel_time:.1f} min")
                         yield self.hold(travel_time)
-                        
-                        # Add to movement time records
-                        actual_time = self.env.now() - start_time
-                        self.movement_times.append(actual_time)
+                        self.movement_times.append(self.env.now() - start_time)
+                        self.total_distance_traveled += distance
 
-                        # Update position and path progress atomically
                         with self.status_lock:
-                            self.position = to_point
+                            self.position = {"x": to_x, "y": to_y}
                             self.current_path_segment += 1
                             self.last_status_time = self.env.now()
 
-                        # Update heat temperature if carrying one
                         if self.current_heat:
-                            try:
-                                self.current_heat.update_temperature(self.env.now())
-                            except AttributeError as e:
-                                logger.warning(f"Heat {self.current_heat.id} lacks update_temperature method: {e}", 
-                                              extra={"component": "ladle_car", "heat_id": self.current_heat.id})
-                            except Exception as e:
-                                logger.error(f"Error updating heat temperature: {e}", exc_info=True)
+                            self.current_heat.update_temperature(self.env.now())
 
-                        # Check if journey is complete
-                        if self.current_path_segment >= len(self.path):
-                            if self.destination:
-                                self.current_bay = self.destination.get("bay", self.current_bay)
-                                self.set_status("unloading" if self.current_heat else "idle")
-                                if not self.current_heat:
-                                    self.destination = None
-                                    self.path = []
-                                    self.current_path_segment = 0
-                            else:
-                                logger.error(f"{self.name()} completed path but has no destination", 
-                                           extra={"component": "ladle_car", "car_id": self.car_id})
-                                self.set_status("idle")
+                        if self.current_path_segment >= len(self.current_path):
+                            self.set_status("unloading" if self.current_heat else "idle")
+                            self.current_path = None
+                            self.current_path_segment = 0
+                            if not self.current_heat:
+                                self.destination = None
                     except Exception as e:
                         logger.error(f"Error during movement for {self.name()}: {e}", exc_info=True)
                         self.error_count += 1
                         self.set_status("error")
-                        yield self.hold(3)  # Wait before resetting
+                        yield self.hold(3)
                         self.set_status("idle")
 
                 elif current_status == "loading":
@@ -354,6 +328,7 @@ class BaseLadleCar(sim.Component):
                             # Reset regardless of heat transfer success
                             self.current_heat = None
                             self.destination = None
+                            self.current_path = None
                             self.path = []
                             self.current_path_segment = 0
                             
@@ -380,6 +355,7 @@ class BaseLadleCar(sim.Component):
                     
                     # Reset to safe state
                     self.path = []
+                    self.current_path = None
                     self.current_path_segment = 0
                     if self.current_bay != self.home_bay and self.spatial_manager:
                         try:

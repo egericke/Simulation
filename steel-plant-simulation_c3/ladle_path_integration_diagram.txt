@@ -1,0 +1,100 @@
+```
++----------------------------------------+
+|      Equipment Layout Editor UI        |
++----------------------------------------+
+|                                        |
+|   +----------+       +-------------+   |
+|   | Toolbar  |       | Properties  |   |
+|   +----------+       +-------------+   |
+|                                        |
+|   +--------------------------------+   |
+|   |                                |   |
+|   |                                |   |
+|   |                                |   |
+|   |        Scene View              |   |
+|   |     (LayoutView)               |   |
+|   |                                |   |
+|   |                                |   |
+|   |                                |   |
+|   +--------------------------------+   |
+|                                        |
+|   +--------------------------------+   |
+|   | Bay: [Bay Selector▼]  [Add Path]   |
+|   | [Finish Path]                      |
+|   +--------------------------------+   |
+|                                        |
++----------------------------------------+
+
+               ▲                    ▲  
+               |                    |
+         User clicks       Path data flows
+         add waypoints
+               |                    |
+               ▼                    ▼
+
++----------------------------------------+
+|            LayoutScene                 |
++----------------------------------------+
+| - ladle_path_mode: bool                |
+| - ladle_car_paths: dict                |
++----------------------------------------+
+| + mouseReleaseEvent(event)             |
+| + set_ladle_path_mode(enabled)         |
+| + paint(painter)                       |
++----------------------------------------+
+               ▲                    ▲  
+               |                    |
+          Scene holds            LadlePathEditor 
+          path data              adds/edits paths
+               |                    |
+               ▼                    ▼
+
++----------------------------------------+
+|           LadlePathEditor              |
++----------------------------------------+
+| - bay_combo: QComboBox                 |
+| - path_id_spin: QSpinBox              |
+| - paths_list: QListWidget             |
+| - drawing_active: bool                 |
+| - waypoints: List                      |
++----------------------------------------+
+| + toggle_path_drawing(checked)         |
+| + add_waypoint(position)               |
+| + update_paths_list()                  |
++----------------------------------------+
+               ▲                    ▲  
+               |                    |
+        Load paths from      Save paths to
+        config               config
+               |                    |
+               ▼                    ▼
+
++----------------------------------------+
+|             config.json                |
++----------------------------------------+
+| {                                      |
+|   ...                                  |
+|   "ladle_car_paths": {                 |
+|     "bay1": [                          |
+|       { "path_id": 1,                  |
+|         "waypoints": [                 |
+|           {"x": 200, "y": 100},        |
+|           {"x": 210, "y": 120}         |
+|         ]                              |
+|       }                                |
+|     ]                                  |
+|   }                                    |
+| }                                      |
++----------------------------------------+
+
+  User Workflow for Drawing Ladle Paths:
+  --------------------------------------
+  1. User selects bay from dropdown
+  2. User clicks "Add Path" button
+  3. Editor enters path drawing mode
+  4. User clicks in scene to add waypoints
+  5. Each waypoint adds to current_path_waypoints
+  6. Visual feedback shown in scene
+  7. User clicks "Finish Path" to save path
+  8. Path saved to config and LayoutScene
+```
