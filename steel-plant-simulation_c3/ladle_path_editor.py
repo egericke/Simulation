@@ -1,310 +1,224 @@
 import logging
-from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QSpinBox, QGroupBox, QListWidget, QListWidgetItem
-)
-from PyQt5.QtGui import (
-    QPainter, QPen, QBrush, QColor, QPainterPath
-)
-from PyQt5.QtCore import (
-    Qt, QPointF
-)
-from equipment_layout_editor import RoutePointItem, RoutePathItem, QGraphicsPathItem, QGraphicsEllipseItem
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QSpinBox, QGroupBox, QListWidget, QListWidgetItem)
+from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QPainterPath)
+from PyQt5.QtCore import (Qt, QPointF)
+from shared_items import RoutePointItem, RoutePathItem, QGraphicsPathItem, QGraphicsEllipseItem
 
+# Setup logging
 logger = logging.getLogger(__name__)
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 class LadlePathEditor(QWidget):
-    """Widget for creating and editing ladle car paths."""
+    """Widget for editing ladle paths."""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_paths=None):
         super().__init__(parent)
-        self.layout = QVBoxLayout(self)
+        self.setWindowTitle("Ladle Path Editor")
+        self.setMinimumSize(800, 600)
         
-        # Controls
-        controls_layout = QHBoxLayout()
+        self.paths = initial_paths or []
+        self.current_path = None
+        self.path_drawing = False
+        self.current_points = []
         
-        self.bay_label = QLabel("Bay:")
-        controls_layout.addWidget(self.bay_label)
+        # Create UI
+        self.create_ui()
         
-        self.bay_combo = QComboBox()
-        controls_layout.addWidget(self.bay_combo)
+        # Populate path list
+        self.update_path_list()
         
-        self.path_label = QLabel("Path ID:")
-        controls_layout.addWidget(self.path_label)
+    def create_ui(self):
+        """Create the user interface."""
+        # Main layout
+        main_layout = QVBoxLayout(self)
         
-        self.path_id_spin = QSpinBox()
-        self.path_id_spin.setRange(1, 100)
-        self.path_id_spin.setValue(1)
-        controls_layout.addWidget(self.path_id_spin)
+        # Path list group
+        path_list_group = QGroupBox("Ladle Paths")
+        path_list_layout = QVBoxLayout(path_list_group)
         
-        self.draw_path_button = QPushButton("Draw Path")
-        self.draw_path_button.setStyleSheet("background-color: #4CAF50; color: white; font-size: 14px; padding: 5px;")
-        self.draw_path_button.setCheckable(True)
-        self.draw_path_button.clicked.connect(self.toggle_path_drawing)
-        controls_layout.addWidget(self.draw_path_button)
+        # Path list
+        self.path_list = QListWidget()
+        self.path_list.currentRowChanged.connect(self.on_path_selected)
+        path_list_layout.addWidget(self.path_list)
         
-        controls_layout.addStretch()
-        self.layout.addLayout(controls_layout)
+        # Path controls
+        path_controls_layout = QHBoxLayout()
         
-        # Paths list
-        paths_group = QGroupBox("Ladle Car Paths")
-        paths_layout = QVBoxLayout()
+        # Add path button
+        add_path_btn = QPushButton("Add Path")
+        add_path_btn.clicked.connect(self.add_path)
+        path_controls_layout.addWidget(add_path_btn)
         
-        self.paths_list = QListWidget()
-        paths_layout.addWidget(self.paths_list)
+        # Remove path button
+        remove_path_btn = QPushButton("Remove Path")
+        remove_path_btn.clicked.connect(self.remove_path)
+        path_controls_layout.addWidget(remove_path_btn)
         
-        # Path operations buttons
-        path_buttons_layout = QHBoxLayout()
+        path_list_layout.addLayout(path_controls_layout)
         
-        self.add_path_button = QPushButton("New Path")
-        self.add_path_button.clicked.connect(self.add_new_path)
-        path_buttons_layout.addWidget(self.add_path_button)
+        # Path editing group
+        path_edit_group = QGroupBox("Edit Path")
+        path_edit_layout = QVBoxLayout(path_edit_group)
         
-        self.edit_path_button = QPushButton("Edit Path")
-        self.edit_path_button.clicked.connect(self.edit_selected_path)
-        path_buttons_layout.addWidget(self.edit_path_button)
+        # Path type
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Path Type:"))
+        self.path_type_combo = QComboBox()
+        self.path_type_combo.addItems(["Ladle Car", "Crane"])
+        self.path_type_combo.currentIndexChanged.connect(self.on_path_type_changed)
+        type_layout.addWidget(self.path_type_combo)
+        path_edit_layout.addLayout(type_layout)
         
-        self.delete_path_button = QPushButton("Delete Path")
-        self.delete_path_button.clicked.connect(self.delete_selected_path)
-        path_buttons_layout.addWidget(self.delete_path_button)
+        # Path name
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Path Name:"))
+        self.path_name_combo = QComboBox()
+        self.path_name_combo.setEditable(True)
+        self.path_name_combo.addItems(["Path 1", "Path 2", "Path 3", "Custom"])
+        name_layout.addWidget(self.path_name_combo)
+        path_edit_layout.addLayout(name_layout)
         
-        paths_layout.addLayout(path_buttons_layout)
+        # Path drawing controls
+        drawing_layout = QHBoxLayout()
         
-        paths_group.setLayout(paths_layout)
-        self.layout.addWidget(paths_group)
+        # Toggle path drawing
+        self.draw_path_btn = QPushButton("Start Drawing Path")
+        self.draw_path_btn.setCheckable(True)
+        self.draw_path_btn.clicked.connect(self.toggle_path_drawing)
+        drawing_layout.addWidget(self.draw_path_btn)
         
-        # Internal properties
-        self.scene = None
-        self.drawing_active = False
-        self.waypoints = []
-        self.current_path_id = 1
-        self.current_bay = None
-        self.temp_path_segment = None
-        self.active_path_items = []
-    
-    def set_scene(self, scene):
-        """Set the scene reference for path editing."""
-        self.scene = scene
-        self.update_bay_combo()
-        self.update_paths_list()
-    
-    def update_bay_combo(self):
-        """Update the bay combo box with available bays."""
-        if not self.scene:
+        # Clear path
+        clear_path_btn = QPushButton("Clear Path")
+        clear_path_btn.clicked.connect(self.clear_path)
+        drawing_layout.addWidget(clear_path_btn)
+        
+        path_edit_layout.addLayout(drawing_layout)
+        
+        # Save path
+        save_path_btn = QPushButton("Save Path")
+        save_path_btn.clicked.connect(self.save_path)
+        path_edit_layout.addWidget(save_path_btn)
+        
+        # Add the groups to the main layout
+        main_layout.addWidget(path_list_group)
+        main_layout.addWidget(path_edit_group)
+        
+        # Done button
+        done_btn = QPushButton("Done")
+        done_btn.clicked.connect(self.close)
+        main_layout.addWidget(done_btn)
+        
+    def update_path_list(self):
+        """Update the path list widget."""
+        self.path_list.clear()
+        for i, path in enumerate(self.paths):
+            path_name = path.get("name", f"Path {i+1}")
+            path_type = path.get("type", "Ladle Car")
+            self.path_list.addItem(f"{path_name} ({path_type})")
+        
+    def on_path_selected(self, index):
+        """Handle path selection."""
+        if index < 0 or index >= len(self.paths):
+            self.current_path = None
             return
             
-        self.bay_combo.clear()
-        for bay in self.scene.bay_items:
-            self.bay_combo.addItem(bay.name)
+        self.current_path = self.paths[index]
         
-        if self.bay_combo.count() > 0:
-            self.current_bay = self.bay_combo.currentText()
-            self.update_paths_list()
+        # Update UI
+        path_type = self.current_path.get("type", "Ladle Car")
+        self.path_type_combo.setCurrentText(path_type)
         
-        # Connect after populating to avoid triggering during setup
-        self.bay_combo.currentTextChanged.connect(self.on_bay_changed)
-    
-    def on_bay_changed(self, bay_name):
-        """Handle bay selection change."""
-        self.current_bay = bay_name
-        self.update_paths_list()
-    
-    def update_paths_list(self):
-        """Update the list of paths for the current bay."""
-        if not self.scene or not self.current_bay:
-            return
+        path_name = self.current_path.get("name", f"Path {index+1}")
+        self.path_name_combo.setCurrentText(path_name)
         
-        self.paths_list.clear()
+        # Reset drawing state
+        self.path_drawing = False
+        self.draw_path_btn.setChecked(False)
+        self.draw_path_btn.setText("Start Drawing Path")
         
-        # Find all paths for the current bay
-        paths = []
-        for path_id in range(1, 100):  # Arbitrary limit
-            path_key = f"{self.current_bay}_path_{path_id}"
-            for key, path in self.scene.ladle_car_paths.items():
-                if key == path_key:
-                    paths.append((path_id, path))
-                    break
+    def on_path_type_changed(self, index):
+        """Handle path type changes."""
+        if self.current_path:
+            self.current_path["type"] = self.path_type_combo.currentText()
+            self.update_path_list()
         
-        # Add them to the list widget
-        for path_id, path in paths:
-            waypoints = path.get("waypoints", [])
-            item_text = f"Path {path_id}: {len(waypoints)} waypoints"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.UserRole, {"path_id": path_id, "path": path})
-            self.paths_list.addItem(item)
-    
+    def add_path(self):
+        """Add a new path."""
+        new_path = {
+            "name": f"Path {len(self.paths)+1}",
+            "type": "Ladle Car",
+            "waypoints": []
+        }
+        self.paths.append(new_path)
+        self.update_path_list()
+        self.path_list.setCurrentRow(len(self.paths) - 1)
+        
+    def remove_path(self):
+        """Remove the selected path."""
+        current_row = self.path_list.currentRow()
+        if current_row >= 0 and current_row < len(self.paths):
+            self.paths.pop(current_row)
+            self.update_path_list()
+            if self.paths:
+                self.path_list.setCurrentRow(min(current_row, len(self.paths) - 1))
+            else:
+                self.current_path = None
+                
     def toggle_path_drawing(self, checked):
         """Toggle path drawing mode."""
-        self.drawing_active = checked
-        
+        self.path_drawing = checked
         if checked:
-            # Enable drawing mode in scene
-            if self.scene:
-                # Clear any existing temporary path segments
-                for item in self.active_path_items:
-                    self.scene.removeItem(item)
-                self.active_path_items.clear()
-                
-                # Reset waypoints
-                self.waypoints.clear()
-                
-                # Get current bay and path ID
-                self.current_bay = self.bay_combo.currentText()
-                self.current_path_id = self.path_id_spin.value()
-                
-                # Set cursor for drawing
-                self.scene.views()[0].setCursor(Qt.CrossCursor)
-                
-                self.draw_path_button.setText("Finish Path")
-                self.draw_path_button.setStyleSheet("background-color: #f44336; color: white; font-size: 14px; padding: 5px;")
+            self.draw_path_btn.setText("Stop Drawing Path")
+            # Signal to the parent that we're starting path drawing
+            if hasattr(self.parent(), "toggle_ladle_path_mode"):
+                path_type = self.path_type_combo.currentText().lower().replace(" ", "_")
+                self.parent().toggle_ladle_path_mode(path_type)
         else:
-            # Disable drawing mode
-            if self.scene and self.waypoints:
-                # Save the path
-                path_data = {
-                    "path_id": self.current_path_id,
-                    "waypoints": self.waypoints
-                }
+            self.draw_path_btn.setText("Start Drawing Path")
+            # Signal to the parent that we're stopping path drawing
+            if hasattr(self.parent(), "toggle_ladle_path_mode"):
+                # Disable path drawing
+                path_type = self.path_type_combo.currentText().lower().replace(" ", "_")
+                self.parent().toggle_ladle_path_mode(path_type, force_disable=True)
                 
-                # Store in scene's paths dictionary
-                path_key = f"{self.current_bay}_path_{self.current_path_id}"
-                self.scene.ladle_car_paths[path_key] = path_data
-                
-                # Clear temporary items
-                self.temp_path_segment = None
-                
-                # Convert to permanent path items
-                self.convert_to_permanent_path()
-                
-                # Reset cursor
-                self.scene.views()[0].setCursor(Qt.ArrowCursor)
-                
-                self.draw_path_button.setText("Draw Path")
-                self.draw_path_button.setStyleSheet("background-color: #4CAF50; color: white; font-size: 14px; padding: 5px;")
-                
-                # Update the paths list
-                self.update_paths_list()
+    def add_waypoint(self, x, y):
+        """Add a waypoint to the current path."""
+        if self.current_path and self.path_drawing:
+            self.current_path.setdefault("waypoints", []).append({
+                "x": x,
+                "y": y
+            })
+            
+    def clear_path(self):
+        """Clear the current path."""
+        if self.current_path:
+            self.current_path["waypoints"] = []
+            
+    def save_path(self):
+        """Save the current path."""
+        if self.current_path:
+            self.current_path["name"] = self.path_name_combo.currentText()
+            self.current_path["type"] = self.path_type_combo.currentText()
+            self.update_path_list()
+            
+    def get_path_data(self):
+        """Get the path data."""
+        return self.paths
+        
+    def set_path_data(self, paths):
+        """Set the path data."""
+        self.paths = paths or []
+        self.update_path_list()
+        
+if __name__ == "__main__":
+    from PyQt5.QtWidgets import QApplication
+    import sys
     
-    def add_waypoint(self, position):
-        """Add a new waypoint to the current path."""
-        if not self.drawing_active:
-            return
-            
-        # Add to waypoints list
-        self.waypoints.append({"x": position.x(), "y": position.y()})
-        
-        # Draw visual representation
-        if len(self.waypoints) > 1:
-            # Draw line to previous point
-            p1 = self.waypoints[-2]
-            p2 = self.waypoints[-1]
-            
-            path = QPainterPath()
-            path.moveTo(p1["x"], p1["y"])
-            path.lineTo(p2["x"], p2["y"])
-            
-            path_item = QGraphicsPathItem(path)
-            path_item.setPen(QPen(QColor(0, 128, 255), 2, Qt.DashLine))
-            
-            self.scene.addItem(path_item)
-            self.active_path_items.append(path_item)
-            
-        # Draw point marker
-        ellipse_item = QGraphicsEllipseItem(position.x() - 5, position.y() - 5, 10, 10)
-        ellipse_item.setBrush(QBrush(QColor(0, 128, 255)))
-        ellipse_item.setPen(QPen(Qt.black))
-        
-        self.scene.addItem(ellipse_item)
-        self.active_path_items.append(ellipse_item)
-    
-    def convert_to_permanent_path(self):
-        """Convert temporary path to a permanent route path."""
-        if len(self.waypoints) < 2:
-            return
-            
-        # Remove temporary items
-        for item in self.active_path_items:
-            self.scene.removeItem(item)
-        self.active_path_items.clear()
-        
-        # Create a route path from the waypoints
-        for i in range(len(self.waypoints) - 1):
-            p1 = {"x": self.waypoints[i]["x"], "y": self.waypoints[i]["y"]}
-            p2 = {"x": self.waypoints[i+1]["x"], "y": self.waypoints[i+1]["y"]}
-            
-            # Create start and end points for the path
-            start_point = RoutePointItem(f"wp_{i}", p1["x"], p1["y"])
-            end_point = RoutePointItem(f"wp_{i+1}", p2["x"], p2["y"])
-            
-            self.scene.addItem(start_point)
-            self.scene.addItem(end_point)
-            
-            # Create a path between the points
-            route = RoutePathItem(start_point, end_point, "LadleCar")
-            self.scene.addItem(route)
-            self.scene.route_paths.append(route)
-    
-    def add_new_path(self):
-        """Start creating a new path."""
-        # Find the next available path ID
-        max_id = 0
-        for key in self.scene.ladle_car_paths.keys():
-            if key.startswith(f"{self.current_bay}_path_"):
-                try:
-                    path_id = int(key.split("_")[-1])
-                    max_id = max(max_id, path_id)
-                except ValueError:
-                    pass
-        
-        # Set the path ID and start drawing
-        self.path_id_spin.setValue(max_id + 1)
-        self.draw_path_button.setChecked(True)
-        self.toggle_path_drawing(True)
-    
-    def edit_selected_path(self):
-        """Edit the selected path."""
-        selected_items = self.paths_list.selectedItems()
-        if not selected_items:
-            return
-            
-        item = selected_items[0]
-        path_data = item.data(Qt.UserRole)
-        
-        self.current_path_id = path_data["path_id"]
-        self.path_id_spin.setValue(self.current_path_id)
-        
-        # Load the waypoints
-        self.waypoints = path_data["path"].get("waypoints", []).copy()
-        
-        # Start editing
-        self.draw_path_button.setChecked(True)
-        self.toggle_path_drawing(True)
-    
-    def delete_selected_path(self):
-        """Delete the selected path."""
-        selected_items = self.paths_list.selectedItems()
-        if not selected_items:
-            return
-            
-        item = selected_items[0]
-        path_data = item.data(Qt.UserRole)
-        
-        path_id = path_data["path_id"]
-        path_key = f"{self.current_bay}_path_{path_id}"
-        
-        # Remove from scene paths dictionary
-        if path_key in self.scene.ladle_car_paths:
-            del self.scene.ladle_car_paths[path_key]
-        
-        # Update the list
-        self.update_paths_list()
-        
-        # Remove visual representation
-        self.remove_path_visual(path_id)
-    
-    def remove_path_visual(self, path_id):
-        """Remove visual representation of a path."""
-        # This would need to identify and remove the path items in the scene
-        # For simplicity, we'll just update the scene
-        if self.scene:
-            self.scene.update()
+    app = QApplication(sys.argv)
+    editor = LadlePathEditor()
+    editor.show()
+    sys.exit(app.exec_())
